@@ -1,0 +1,4 @@
+End-of-video creature scream layers, all CC0 (public domain) from OpenGameArt.org:
+- scream_01.ogg, roar_02.ogg  from "80 CC0 creature SFX"  https://opengameart.org/content/80-cc0-creature-sfx
+- scream_horror1.mp3           from "Horror Scream 1"       https://opengameart.org/content/horror-scream1
+No attribution is required under CC0.
