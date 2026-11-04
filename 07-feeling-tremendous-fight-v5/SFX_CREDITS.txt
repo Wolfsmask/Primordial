@@ -1,0 +1,5 @@
+Swing, whiff and impact sounds: all CC0 (public domain) from OpenGameArt.org, no attribution required.
+- swish-*.wav            "Swishes Sound Pack"                      https://opengameart.org/content/swishes-sound-pack
+- sword.*.ogg            "20 Sword Sound Effects (Attacks and Clashes)"  https://opengameart.org/content/20-sword-sound-effects-attacks-and-clashes
+- bfh1_*.ogg             "75 CC0 breaking / falling / hit sfx"      https://opengameart.org/content/75-cc0-breaking-falling-hit-sfx
+- punches, blocks, slaps, thumps, the sword's quiver: synthesized for this video (no third-party audio)
