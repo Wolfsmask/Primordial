@@ -1,0 +1,2 @@
+All visuals, terrain and textures were generated for this video (original pixel-art textures in a blocky style).
+All sound (wind, heartbeat, breathing, birds, ambient pad) was synthesised for this video. No third-party audio is used.
