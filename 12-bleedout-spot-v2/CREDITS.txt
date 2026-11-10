@@ -1,0 +1,13 @@
+Visuals: all terrain, textures, the character animation and the "shader" grade were made for this video
+(original pixel-art textures in a blocky style; first-person IK walk, slide and sit on the bendy rig).
+
+Music: "Feel Good Inc." (Gorillaz), 0:50.6 to 1:19.1. The song file was supplied by the channel. It is a commercial
+recording and is not licensed by this project: on YouTube, adding it from the Shorts audio library (or accepting a
+Content ID claim) is the usual way to use it.
+
+Sound effects:
+- Footsteps and bark touches: "Different steps on wood, stone, leaves, gravel and mud" by TinyWorlds, CC0 (public domain)
+  https://opengameart.org/content/different-steps-on-wood-stone-leaves-gravel-and-mud
+- Body hitting the ground: "75 CC0 breaking / falling / hit sfx", CC0 (public domain)
+  https://opengameart.org/content/75-cc0-breaking-falling-hit-sfx  (plus a synthesised low thump)
+No wind or ambient synth sounds in this version.
