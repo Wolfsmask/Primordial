@@ -1,0 +1,967 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>bleedout spot v5</title>
+<style>html,body{margin:0;background:#000;overflow:hidden}</style>
+<script type="importmap">{"imports":{"three":"./node_modules/three/build/three.module.js","three/addons/":"./node_modules/three/examples/jsm/"}}</script>
+</head><body>
+<script type="module">
+// A small shader-pack pipeline in the spirit of Photon (sixthsurge): HDR scene, physically based sky, volumetric
+// cloud sea + high cumulus with multi-scattering octaves and the powder term, aerial perspective with sun shafts
+// from a far shadow map, crepuscular rays, bloom, Lottes filmic tonemap.  Photon itself only runs inside Minecraft.
+import * as THREE from 'three';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+const DEG = Math.PI / 180;
+const dirYE = (yaw, el) => new THREE.Vector3(-Math.sin(yaw * DEG) * Math.cos(el * DEG), Math.sin(el * DEG), -Math.cos(yaw * DEG) * Math.cos(el * DEG));
+const SUN_DIR = dirYE(205, 1.8);
+const MOON_DIR = dirYE(50, 24), MOON2_DIR = dirYE(42.5, 30.5);
+const WATER_Y = 64.88;
+const SUN_COL = new THREE.Vector3(1.0, 0.50, 0.25).multiplyScalar(4.4);       // direct sun after a long path through the air
+const AMB_HI = new THREE.Vector3(0.22, 0.32, 0.58), AMB_LO = new THREE.Vector3(0.30, 0.27, 0.28);
+const CLOUD_LO = 62.0, CLOUD_HI = 118.0;
+
+const renderer = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1);
+renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.NoToneMapping;
+renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
+renderer.autoClear = true;
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, 9 / 16, 0.05, 40000);
+const U = { time: { value: 0 } };
+
+// ------------------------------------------------------------------ sky: single scattering, sun, the ringed planet, cirrus
+const COMMON = `
+float hg(float c, float g) { float g2 = g * g; return (1.0 - g2) / (12.566 * pow(max(1.0 + g2 - 2.0 * g * c, 1e-4), 1.5)); }
+float hash12(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
+float vn2(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash12(i), hash12(i + vec2(1, 0)), f.x), mix(hash12(i + vec2(0, 1)), hash12(i + vec2(1, 1)), f.x), f.y); }
+float fbm2(vec2 p) { float s = 0.0, a = 0.5; for (int i = 0; i < 5; i++) { s += a * vn2(p); p = p * 2.03 + 7.1; a *= 0.5; } return s; }
+`;
+const skyMat = new THREE.ShaderMaterial({
+  side: THREE.BackSide, depthWrite: false, depthTest: false,
+  uniforms: { sunDir: { value: SUN_DIR }, moonDir: { value: MOON_DIR }, moon2Dir: { value: MOON2_DIR }, uTime: U.time },
+  vertexShader: `varying vec3 vDir; void main(){ vDir = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: COMMON + `
+  uniform vec3 sunDir; uniform vec3 moonDir; uniform vec3 moon2Dir; uniform float uTime; varying vec3 vDir;
+  const float Rg = 6360e3, Rt = 6420e3;
+  const vec3 bR = vec3(5.8e-6, 13.5e-6, 33.1e-6); const float bM = 8e-6;
+  const vec3 bO = vec3(0.65e-6, 1.881e-6, 0.085e-6) * 1.7;            // extra ozone: a violet-teal twilight
+  vec2 rs(vec3 o, vec3 d, float r) { float b = dot(o, d), c = dot(o, o) - r * r, h = b * b - c; if (h < 0.0) return vec2(-1.0); h = sqrt(h); return vec2(-b - h, -b + h); }
+  vec3 odLight(vec3 p) { float t = rs(p, sunDir, Rt).y; float dt = t / 6.0; vec3 od = vec3(0.0);
+    for (int i = 0; i < 6; i++) { vec3 q = p + sunDir * (float(i) + 0.5) * dt; float h = length(q) - Rg; od += vec3(exp(-h / 8000.0), exp(-h / 1200.0), exp(-h / 8000.0)) * dt; }
+    return od; }
+  vec3 atmo(vec3 rd, out vec3 Tv) {
+    vec3 ro = vec3(0.0, Rg + 260.0, 0.0);
+    float tmax = rs(ro, rd, Rt).y; float tg = rs(ro, rd, Rg).x; if (tg > 0.0) tmax = min(tmax, tg);
+    float dt = tmax / 16.0; vec3 sumR = vec3(0.0), sumM = vec3(0.0); vec3 od = vec3(0.0);
+    for (int i = 0; i < 16; i++) {
+      vec3 p = ro + rd * (float(i) + 0.5) * dt; float h = length(p) - Rg;
+      vec3 dd = vec3(exp(-h / 8000.0), exp(-h / 1200.0), exp(-h / 8000.0)) * dt; od += dd;
+      vec3 ol = odLight(p);
+      vec3 tau = bR * (od.x + ol.x) + bM * 1.1 * (od.y + ol.y) + bO * (od.z + ol.z);
+      vec3 att = exp(-tau);
+      sumR += dd.x * att; sumM += dd.y * att;
+    }
+    Tv = exp(-(bR * od.x + bM * 1.1 * od.y + bO * od.z));
+    float mu = dot(rd, sunDir);
+    float pR = 3.0 / (16.0 * 3.14159) * (1.0 + mu * mu);
+    float pM = hg(mu, 0.76);
+    vec3 L = 7.5 * (sumR * bR * pR + sumM * bM * pM); float l = dot(L, vec3(0.3, 0.5, 0.2)); return mix(vec3(l), L, 1.35);
+  }
+  float hash13(vec3 p) { p = fract(p * 0.1031); p += dot(p, p.zyx + 31.32); return fract((p.x + p.y) * p.z); }
+  vec3 moonC(vec3 col, vec3 rd, vec3 md, float radDeg, vec3 Tv, float tint) {
+    float sr = sin(radDeg * 0.0174533);
+    vec3 px = normalize(cross(md, vec3(0.0, 1.0, 0.0))); vec3 py = cross(px, md);
+    vec2 q = vec2(dot(rd, px), dot(rd, py)) / sr; float r = length(q);
+    if (dot(rd, md) < 0.0) return col;
+    col += Tv * vec3(0.62, 0.70, 0.92) * (0.16 * exp(-max(r - 1.0, 0.0) * 0.9) + 0.05 * exp(-max(r - 1.0, 0.0) * 0.18)) * (radDeg > 1.5 ? 1.0 : 0.35);      // a soft halo
+    if (r > 1.0) return col;
+    vec3 n = normalize(q.x * px + q.y * py - sqrt(1.0 - r * r) * md);
+    float lit = smoothstep(-0.05, 0.10, dot(n, sunDir));
+    float maria = fbm2(vec2(n.x * 2.3 + n.z * 1.1, n.y * 2.6) + 3.0); float crat = fbm2(vec2(n.x * 9.0 - n.y * 3.0, n.z * 8.0 + n.y * 4.0));
+    vec3 alb = vec3(0.80, 0.79, 0.80) * (0.58 + 0.50 * smoothstep(0.35, 0.72, maria)) * (0.80 + 0.28 * crat);
+    alb *= mix(vec3(1.0), vec3(0.82, 0.92, 1.0), tint);
+    vec3 mc = alb * (2.7 * lit + 0.04);
+    return mix(col, col * 0.3 + Tv * mc, smoothstep(1.0, 0.975, r));
+  }
+  void main(){
+    vec3 rd = normalize(vDir);
+    vec3 r2 = rd; if (r2.y < 0.0) r2.y *= 0.3;
+    vec3 Tv; vec3 col = atmo(normalize(r2), Tv);
+    float cs = dot(rd, sunDir);
+    col += Tv * vec3(1.0, 0.78, 0.55) * 700.0 * smoothstep(0.99990, 0.99994, cs);
+    col += Tv * vec3(1.0, 0.5, 0.25) * (pow(max(cs, 0.0), 300.0) * 2.5 + pow(max(cs, 0.0), 30.0) * 0.3);
+    float lum = dot(col, vec3(0.3, 0.5, 0.2));
+    float dark = clamp(1.3 - lum * 1.2, 0.0, 1.0) * smoothstep(0.02, 0.22, rd.y);
+    // the first stars, where the sky is already dark
+    vec3 sp = rd * 230.0; vec3 ci = floor(sp); float hs = hash13(ci);
+    if (hs > 0.9925) { vec3 c = ci + vec3(hash13(ci + 1.3), hash13(ci + 2.7), hash13(ci + 4.1)); float d = length(sp - c);
+      float tw = 0.65 + 0.35 * sin(uTime * 3.0 + hs * 900.0);
+      col += mix(vec3(1.0, 0.92, 0.85), vec3(0.8, 0.9, 1.0), hash13(ci + 9.0)) * smoothstep(0.42, 0.0, d) * pow((hs - 0.9925) / 0.0075, 1.6) * 6.5 * tw * dark; }
+    // a faint aurora low in the north - easy to take for the last light at first
+    float yawd = degrees(atan(-rd.x, -rd.z)); float el = asin(clamp(rd.y, -1.0, 1.0));
+    float aw = smoothstep(-50.0, -15.0, yawd) * (1.0 - smoothstep(55.0, 85.0, yawd));
+    if (aw > 0.0 && el > 0.12) {
+      float x = yawd / 30.0;
+      float base = 0.27 + 0.08 * sin(x * 1.7 + 0.6) + 0.04 * sin(x * 4.3 + uTime * 0.1);
+      float rays = pow(fbm2(vec2(x * 16.0 + uTime * 0.06, 0.0)), 2.2) * 1.8 * (0.6 + 0.4 * fbm2(vec2(x * 3.0 - uTime * 0.03, 7.0)));
+      float fold = smoothstep(base, base + 0.035, el) * exp(-max(el - base, 0.0) / 0.30);
+      vec3 ac = mix(vec3(0.12, 1.0, 0.55), vec3(0.80, 0.30, 0.80), smoothstep(base + 0.06, base + 0.32, el));
+      col += ac * fold * rays * aw * (0.25 + 0.75 * dark) * 0.22;
+    }
+    col = moonC(col, rd, moonDir, 4.2, Tv, 0.0);
+    col = moonC(col, rd, moon2Dir, 0.7, Tv, 1.0);
+    // cirrus, lit from below by the sunset
+    if (rd.y > 0.0) {
+      vec2 uv = rd.xz / rd.y * 0.0009 + vec2(uTime * 0.002, 0.0);
+      float c = fbm2(uv * vec2(1.0, 4.0) + fbm2(uv * 3.0) * 1.6);
+      float cir = smoothstep(0.55, 0.86, c) * smoothstep(0.0, 0.2, rd.y) * 0.5;
+      vec3 cl = vec3(1.0, 0.55, 0.45) * (0.5 + 3.0 * hg(cs, 0.6)) + vec3(0.45, 0.45, 0.85) * 0.35;
+      col = mix(col, cl * 1.2 * Tv + col * 0.3, cir);
+    }
+    gl_FragColor = vec4(col, 1.0);
+  }`
+});
+const sky = new THREE.Mesh(new THREE.SphereGeometry(30000, 64, 32), skyMat);
+sky.renderOrder = -10; sky.frustumCulled = false; scene.add(sky);
+
+// ------------------------------------------------------------------ light
+const sun = new THREE.DirectionalLight(new THREE.Color(SUN_COL.x, SUN_COL.y, SUN_COL.z).multiplyScalar(1 / 4.8), 4.8);
+const C0 = new THREE.Vector3(-60, 230, 10);
+sun.position.copy(C0).addScaledVector(SUN_DIR, 1500); sun.target.position.copy(C0);
+sun.castShadow = true; sun.shadow.mapSize.set(4096, 4096);
+{ const c = sun.shadow.camera; c.left = -240; c.right = 240; c.top = 240; c.bottom = -240; c.near = 600; c.far = 2600; }
+sun.shadow.bias = -0.0003; sun.shadow.normalBias = 0.25;
+scene.add(sun); scene.add(sun.target);
+const hemi = new THREE.HemisphereLight(new THREE.Color(AMB_HI.x, AMB_HI.y, AMB_HI.z), new THREE.Color(AMB_LO.x, AMB_LO.y, AMB_LO.z), 1.5);
+scene.add(hemi);
+
+// ------------------------------------------------------------------ world
+const atlas = await new THREE.TextureLoader().loadAsync('atlas.png');
+atlas.magFilter = THREE.NearestFilter; atlas.minFilter = THREE.NearestMipmapLinearFilter; atlas.flipY = false;
+atlas.colorSpace = THREE.SRGBColorSpace; atlas.anisotropy = 4;
+const ROWS = 5;
+function waving(mat, kind) {
+  mat.onBeforeCompile = (sh) => {
+    sh.uniforms.uTime = U.time;
+    const add = kind === 'leaves'
+      ? `transformed += vec3(sin(uTime * 1.7 + position.x * 0.7 + position.z * 0.5), 0.5 * sin(uTime * 2.3 + position.y * 0.9), cos(uTime * 1.9 + position.z * 0.8 + position.x * 0.3)) * 0.035;`
+      : `float tip = step(fract(uv.y * ${ROWS}.0), 0.5); transformed += vec3(sin(uTime * 2.1 + position.x * 1.3 + position.z * 0.7), 0.0, cos(uTime * 1.7 + position.z * 1.1 + position.x * 0.4)) * 0.08 * tip;`;
+    sh.vertexShader = 'uniform float uTime;\n' + sh.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\n' + add);
+  };
+}
+// far shadow map: the whole vista seen from the sun, rendered once (pillars, islands, the colossus, the arch)
+const FAR = { size: 4096 };
+FAR.rt = new THREE.WebGLRenderTarget(FAR.size, FAR.size, { depthBuffer: true });
+FAR.rt.depthTexture = new THREE.DepthTexture(FAR.size, FAR.size, THREE.FloatType);
+FAR.cam = new THREE.OrthographicCamera(-3300, 3300, 3300, -3300, 1, 16000);
+{ const c = new THREE.Vector3(-1500, 300, 200); FAR.cam.position.copy(c).addScaledVector(SUN_DIR, 7000); FAR.cam.lookAt(c); FAR.cam.updateMatrixWorld(); }
+FAR.mat = new THREE.Matrix4();
+const FAR_GLSL = `
+uniform sampler2D tFarDepth; uniform mat4 farMat;
+float farVis(vec3 p) {
+  vec4 c = farMat * vec4(p, 1.0); vec3 q = c.xyz / c.w * 0.5 + 0.5;
+  if (q.x < 0.0 || q.x > 1.0 || q.y < 0.0 || q.y > 1.0 || q.z > 1.0) return 1.0;
+  float s = 0.0; vec2 tx = vec2(1.0 / 4096.0);
+  for (int i = -1; i <= 1; i++) for (int j = -1; j <= 1; j++) { float d = texture2D(tFarDepth, q.xy + vec2(float(i), float(j)) * tx * 1.5).r; s += (q.z - 0.00045 > d) ? 0.0 : 1.0; }
+  return s / 9.0;
+}`;
+const FARU = { tFarDepth: { value: FAR.rt.depthTexture }, farMat: { value: FAR.mat } };
+function farShadowed(mat) {
+  mat.onBeforeCompile = (sh) => {
+    Object.assign(sh.uniforms, FARU);
+    sh.vertexShader = 'varying vec3 vWP;\n' + sh.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\nvWP = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+    sh.fragmentShader = 'varying vec3 vWP;\n' + FAR_GLSL + '\n' + sh.fragmentShader.replace('#include <lights_fragment_end>', '#include <lights_fragment_end>\nreflectedLight.directDiffuse *= farVis(vWP);');
+  };
+}
+const M = {
+  detail_opaque: new THREE.MeshLambertMaterial({ map: atlas, vertexColors: true }),
+  detail_leaves: new THREE.MeshLambertMaterial({ map: atlas, vertexColors: true, alphaTest: 0.5, side: THREE.DoubleSide }),
+  detail_plants: new THREE.MeshLambertMaterial({ map: atlas, vertexColors: true, alphaTest: 0.5, side: THREE.DoubleSide }),
+  obj_objects: new THREE.MeshLambertMaterial({ vertexColors: true }),
+  lod_lod: new THREE.MeshLambertMaterial({ vertexColors: true }),
+};
+waving(M.detail_leaves, 'leaves'); waving(M.detail_plants, 'plants');
+farShadowed(M.obj_objects); farShadowed(M.lod_lod); farShadowed(M.detail_opaque);
+const REFL = { cam: new THREE.PerspectiveCamera(), texMat: new THREE.Matrix4(), rt: null };
+const waterMat = new THREE.ShaderMaterial({
+  uniforms: { tRefl: { value: null }, reflMat: { value: REFL.texMat }, uTime: U.time, sunDir: { value: SUN_DIR }, sunCol: { value: SUN_COL } },
+  vertexShader: `uniform mat4 reflMat; varying vec4 vR; varying vec3 vWP; void main(){ vec4 wp = modelMatrix * vec4(position, 1.0); vWP = wp.xyz; vR = reflMat * wp; gl_Position = projectionMatrix * viewMatrix * wp; }`,
+  fragmentShader: COMMON + `uniform sampler2D tRefl; uniform float uTime; uniform vec3 sunDir; uniform vec3 sunCol; varying vec4 vR; varying vec3 vWP;
+    vec2 waves(vec2 p) { float e = 0.35; vec2 q1 = p * 0.09 + vec2(uTime * 0.05, uTime * 0.03), q2 = p * 0.27 - vec2(uTime * 0.08, -uTime * 0.05);
+      float a = vn2(q1), b = vn2(q2);
+      return vec2(vn2(q1 + vec2(e, 0.0)) - a, vn2(q1 + vec2(0.0, e)) - a) + 0.5 * vec2(vn2(q2 + vec2(e, 0.0)) - b, vn2(q2 + vec2(0.0, e)) - b); }
+    void main(){
+      vec3 V = normalize(cameraPosition - vWP); float dist = length(cameraPosition - vWP);
+      vec2 g = waves(vWP.xz) * mix(1.0, 0.35, smoothstep(200.0, 2500.0, dist));
+      vec3 N = normalize(vec3(-g.x * 0.5, 1.0, -g.y * 0.5));
+      vec4 r = vR; r.xy += N.xz * r.w * 0.035;
+      vec3 refl = texture2DProj(tRefl, r).rgb;
+      float fres = 0.02 + 0.98 * pow(1.0 - max(dot(N, V), 0.0), 5.0);
+      vec3 c = mix(vec3(0.010, 0.026, 0.034), refl, clamp(0.42 + fres * 1.2, 0.0, 0.94));
+      vec3 Hh = normalize(sunDir + V); c += sunCol * pow(max(dot(N, Hh), 0.0), 700.0) * 5.0;
+      gl_FragColor = vec4(c, 1.0);
+    }`
+});
+M.wat_water = waterMat;
+// tile averages (linear), for where a block is smaller than a pixel
+const AVG = (() => { const c = document.createElement('canvas'); c.width = atlas.image.width; c.height = atlas.image.height; const g = c.getContext('2d');
+  g.drawImage(atlas.image, 0, 0); const d = g.getImageData(0, 0, c.width, c.height).data; const out = [];
+  for (let t = 0; t < 40; t++) { const cx = (t % 8) * 16, cy = Math.floor(t / 8) * 16; let r = 0, gg = 0, b = 0, w = 0;
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) { const i = ((cy + y) * c.width + cx + x) * 4, a = d[i + 3] / 255;
+      r += Math.pow(d[i] / 255, 2.2) * a; gg += Math.pow(d[i + 1] / 255, 2.2) * a; b += Math.pow(d[i + 2] / 255, 2.2) * a; w += a; }
+    out.push(new THREE.Vector3(r / Math.max(w, 1e-3), gg / Math.max(w, 1e-3), b / Math.max(w, 1e-3))); }
+  return out; })();
+const TERRAIN_GLSL = `
+float th11(float n) { return fract(sin(n * 127.1 + 11.7) * 43758.5453); }
+float th13(vec3 p) { p = fract(p * vec3(0.1031, 0.1030, 0.0973)); p += dot(p, p.yzx + 33.33); return fract((p.x + p.y) * p.z); }
+float th12(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
+float tvn2(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(th12(i), th12(i + vec2(1, 0)), f.x), mix(th12(i + vec2(0, 1)), th12(i + vec2(1, 1)), f.x), f.y); }
+`;
+const ATLASU = { tAtlas: { value: atlas }, avgCol: { value: AVG } };
+function worldTex(mat) {
+  const prev = mat.onBeforeCompile;
+  mat.onBeforeCompile = (sh, r) => {
+    if (prev) prev(sh, r);
+    Object.assign(sh.uniforms, ATLASU);
+    sh.vertexShader = 'attribute vec4 aTile; attribute float aTop;\nvarying vec3 vWPa; varying vec3 vNWa; flat varying vec3 vTile; flat varying float vTopa; varying float vSnow;\n' + sh.vertexShader.replace('#include <begin_vertex>', `#include <begin_vertex>
+      vec4 wpa = vec4(transformed, 1.0);
+      #ifdef USE_INSTANCING
+        wpa = instanceMatrix * wpa;
+      #endif
+      vWPa = (modelMatrix * wpa).xyz;
+      vec3 nna = objectNormal;
+      #ifdef USE_INSTANCING
+        nna = mat3(instanceMatrix) * nna;
+      #endif
+      vNWa = normalize(mat3(modelMatrix) * nna); vTile = aTile.xyz; vTopa = aTop; vSnow = aTile.w / 255.0;`);
+    sh.fragmentShader = 'uniform sampler2D tAtlas; uniform vec3 avgCol[40];\nvarying vec3 vWPa; varying vec3 vNWa; flat varying vec3 vTile; flat varying float vTopa; varying float vSnow;\n' + TERRAIN_GLSL + sh.fragmentShader.replace('#include <color_fragment>', `#include <color_fragment>
+      { vec3 an = abs(vNWa); vec2 uvw; float tile;
+        bool same = abs(vTile.x - vTile.y) < 0.5 && abs(vTile.y - vTile.z) < 0.5;
+        if (an.y > 0.6) { uvw = vWPa.xz; tile = vTile.x; }
+        else { uvw = an.x > an.z ? vec2(vWPa.z, -vWPa.y) : vec2(vWPa.x, -vWPa.y);
+          float dep = vTopa - vWPa.y;
+          tile = (vTopa < -1000.0 || same) ? vTile.y : (dep < 1.0 ? vTile.y : (dep < 4.0 ? vTile.z : 3.0)); }
+        tile = floor(tile + 0.5);
+        vec2 cr = vec2(mod(tile, 8.0), floor(tile / 8.0));
+        vec2 dx = dFdx(uvw), dy = dFdy(uvw);
+        vec2 auv = (cr + 0.004 + fract(uvw) * 0.992) / vec2(8.0, 5.0);
+        vec3 tc = textureGrad(tAtlas, auv, dx / vec2(8.0, 5.0), dy / vec2(8.0, 5.0)).rgb;
+        float lodl = log2(max(length(dx), length(dy)) * 16.0 + 1e-6);
+        float farK = smoothstep(2.0, 3.6, lodl);
+        tc = mix(tc, avgCol[int(tile)], farK);
+        // ---- what a mountain looks like from far off, where one block is a pixel or less
+        float fp = max(length(dFdx(vWPa)), length(dFdy(vWPa)));            // metres per pixel here
+        float dcam = length(vWPa - cameraPosition);
+        bool rocky = tile == 3.0 || tile == 4.0 || tile == 6.0 || tile == 34.0;
+        // rock layers: irregular, warped beds of different stone, broken up so they never read as stripes
+        if (rocky && vTopa < 1e5) {
+          float wy = vWPa.y + 26.0 * (tvn2(vWPa.xz / 170.0) - 0.5) + 9.0 * (tvn2(vWPa.xz / 47.0 + 7.1) - 0.5) + 0.035 * vWPa.x - 0.02 * vWPa.z;
+          // thick units (one kind of rock each) made of thinner beds of uneven thickness
+          float wu = wy / 24.0, bu = floor(wu), hu = th11(bu + 40.0);
+          float wb = wy / (4.5 + 5.0 * th11(bu + 3.0)), bb = floor(wb), hb = th11(bb + bu * 7.0);
+          vec3 unit = hu < 0.38 ? avgCol[3] : hu < 0.64 ? avgCol[4] * 1.05 : hu < 0.80 ? avgCol[6] * 0.95 : hu < 0.90 ? mix(avgCol[5], avgCol[3], 0.8) : avgCol[7];
+          vec3 layer = unit * (0.88 + 0.24 * hb);
+          if (hb > 0.94) layer = mix(layer, avgCol[32], 0.35);                 // the odd pale bed
+          float brk = smoothstep(0.3, 0.7, tvn2(vWPa.xz / 60.0 + vec2(hu * 13.0, hb * 7.0)));
+          vec3 rockc = mix(avgCol[int(tile)], layer, 0.45 + 0.4 * brk);
+          float hb2 = hu;
+          float lk = smoothstep(1.2, 2.6, 6.5 / max(fp, 1e-3)) * smoothstep(450.0, 1100.0, dcam);   // only where the beds are > 2 px and far
+          tc = mix(tc, tc * rockc / max(avgCol[int(tile)], vec3(0.02)), lk * (1.0 - farK));
+          tc = mix(tc, rockc, lk * farK);
+        }
+        // block grain: each block a slightly different shade, at a block size that never drops under ~2 px
+        { float lv = log2(max(fp * 2.2, 1.0)), l0 = floor(lv), fr = lv - l0;
+          float s0 = exp2(l0), s1 = s0 * 2.0;
+          float g0 = th13(floor((vWPa - vNWa * 0.3 * s0) / s0)), g1 = th13(floor((vWPa - vNWa * 0.3 * s1) / s1) + 31.0);
+          float g = mix(g0, g1, fr);
+          float gk = farK * (rocky ? 1.0 : 0.6);
+          tc *= mix(1.0, 0.8 + 0.4 * g, gk);
+          if (rocky) { float ga = mix(th13(floor((vWPa - vNWa * 0.3 * s0) / s0) + 5.0), th13(floor((vWPa - vNWa * 0.3 * s1) / s1) + 9.0), fr);
+            tc = mix(tc, (ga > 0.5 ? avgCol[7] : avgCol[6]) * (0.85 + 0.3 * g), farK * smoothstep(0.78, 0.9, ga) * 0.7); }
+          // snow on the far mountains: caps, gullies, ledges; steep faces stay dark, high faces take a dusting
+          if (vTopa < -1000.0 && vSnow > 0.01) {
+            float sn = vSnow + 0.34 * (tvn2(vWPa.xz / 21.0) - 0.5) + 0.18 * (tvn2(vWPa.xz / 6.3 + 3.3) - 0.5);
+            float hi = smoothstep(1000.0, 1350.0, vWPa.y);
+            float holds = smoothstep(mix(0.40, 0.22, hi), mix(0.66, 0.45, hi), vNWa.y + 0.22 * (g - 0.5));
+            float sk = smoothstep(0.44, 0.56, sn) * holds;
+            float coul = 0.6 * tvn2(vWPa.xz / 9.0 + 1.7) + 0.4 * tvn2(vWPa.xz / 31.0 + 5.3);    // on steep faces this runs downhill in streaks
+            sk = max(sk, smoothstep(0.45, 0.8, vSnow) * smoothstep(0.56, 0.7, coul + 0.08 * (g - 0.5)) * 0.92);
+            tc = mix(tc, avgCol[9] * (0.9 + 0.1 * g), sk);
+          }
+        }
+        diffuseColor.rgb *= tc; }`);
+  };
+}
+const lodMat = new THREE.MeshLambertMaterial({ vertexColors: true }); farShadowed(lodMat); worldTex(lodMat);
+const meta = await (await fetch('meta.json')).json();
+const WORLD = [], WATER = [];
+for (const [g, info] of Object.entries(meta.groups)) {
+  if (info.kind === 'lod5') {
+    const buf = await (await fetch(info.file)).arrayBuffer(); const P = info.parts;
+    const pos = new Float32Array(buf, P.pos[0], P.pos[1]), top = new Float32Array(buf, P.top[0], P.top[1]), idx = new Uint32Array(buf, P.idx[0], P.idx[1]);
+    const nrm = new Int8Array(buf, P.nrm[0], P.nrm[1]), col = new Uint8Array(buf, P.col[0], P.col[1]), tl = new Uint8Array(buf, P.tile[0], P.tile[1]);
+    for (const [ck, v0, nv, i0, ni] of info.chunks) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(pos.subarray(v0 * 3, (v0 + nv) * 3), 3));
+      geo.setAttribute('normal', new THREE.BufferAttribute(nrm.subarray(v0 * 3, (v0 + nv) * 3), 3, true));
+      geo.setAttribute('color', new THREE.BufferAttribute(col.subarray(v0 * 3, (v0 + nv) * 3), 3, true));
+      geo.setAttribute('aTile', new THREE.BufferAttribute(tl.subarray(v0 * 4, (v0 + nv) * 4), 4, false));
+      geo.setAttribute('aTop', new THREE.BufferAttribute(top.subarray(v0, v0 + nv), 1));
+      geo.setIndex(new THREE.BufferAttribute(idx.subarray(i0, i0 + ni), 1)); geo.computeBoundingSphere();
+      const mesh = new THREE.Mesh(geo, lodMat); mesh.castShadow = false; mesh.receiveShadow = true; scene.add(mesh); WORLD.push(mesh);
+    }
+    continue;
+  }
+  if (!M[g]) continue;
+  const buf = await (await fetch(info.file)).arrayBuffer();
+  const P = info.parts;
+  const pos = new Float32Array(buf, P.pos[0], P.pos[1]), idx = new Uint32Array(buf, P.idx[0], P.idx[1]);
+  const uv = new Uint16Array(buf, P.uv[0], P.uv[1]), nrm = new Int8Array(buf, P.nrm[0], P.nrm[1]), col = new Uint8Array(buf, P.col[0], P.col[1]);
+  for (const [ck, v0, nv, i0, ni] of info.chunks) {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos.subarray(v0 * 3, (v0 + nv) * 3), 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(nrm.subarray(v0 * 3, (v0 + nv) * 3), 3, true));
+    geo.setAttribute('uv', new THREE.BufferAttribute(uv.subarray(v0 * 2, (v0 + nv) * 2), 2, true));
+    geo.setAttribute('color', new THREE.BufferAttribute(col.subarray(v0 * 3, (v0 + nv) * 3), 3, true));
+    geo.setIndex(new THREE.BufferAttribute(idx.subarray(i0, i0 + ni), 1));
+    geo.computeBoundingSphere();
+    const mesh = new THREE.Mesh(geo, M[g]);
+    mesh.castShadow = g.startsWith('detail') || g === 'obj_objects'; mesh.receiveShadow = g !== 'wat_water';
+    scene.add(mesh); if (g === 'wat_water') WATER.push(mesh); else WORLD.push(mesh);
+  }
+}
+// forests beyond the detailed blocks: textured voxel-style trees, placed by the same rules as the detailed ones
+{
+  const buf = await (await fetch('trees5.bin')).arrayBuffer(); const T = new Float32Array(buf);
+  const LEAF = [15, 19, 17, 21], LOG = [13, 18, 16, 20];
+  const box = (w, h, d, x, y0, z, tile) => { const g = new THREE.BoxGeometry(w, h, d); g.translate(x, y0 + h / 2, z); g.deleteAttribute('uv');
+    const n = g.attributes.position.count, at = new Uint8Array(n * 4), col = new Uint8Array(n * 3).fill(255);
+    for (let i = 0; i < n; i++) at.set([tile, tile, tile, 0], i * 4);
+    g.setAttribute('aTile', new THREE.BufferAttribute(at, 4, false)); g.setAttribute('aTop', new THREE.BufferAttribute(new Float32Array(n).fill(-1e4), 1));
+    g.setAttribute('color', new THREE.BufferAttribute(col, 3, true)); return g; };
+  // canopies modelled around the trunk top (y = 0), for a trunk of unit height scaled later; spruce is modelled for h = 12
+  const CAN = [
+    () => mergeGeometries([box(5, 3, 5, 0, -2, 0, LEAF[0]), box(3, 1.5, 3, 0, 1, 0, LEAF[0]), box(7, 1.5, 3, 0, -1.5, 0, LEAF[0]), box(3, 1.5, 7, 0, -1.5, 0, LEAF[0])]),
+    () => mergeGeometries([box(7, 2, 7, 0, -9, 0, LEAF[1]), box(5, 3, 5, 0, -7, 0, LEAF[1]), box(4, 3, 4, 0, -4, 0, LEAF[1]), box(2.6, 3, 2.6, 0, -1, 0, LEAF[1]), box(1, 2, 1, 0, 2, 0, LEAF[1])]),
+    () => mergeGeometries([box(3, 4.5, 3, 0, -2.5, 0, LEAF[2]), box(5, 2, 3, 0, -1.5, 0, LEAF[2]), box(3, 2, 5, 0, -1.5, 0, LEAF[2])]),
+    () => mergeGeometries([box(7, 2.2, 7, 0, -0.6, 0, LEAF[3]), box(5, 1.5, 5, 0, 1.6, 0, LEAF[3]), box(9, 0.8, 5, 0, -0.4, 0, LEAF[3]), box(5, 0.8, 9, 0, -0.4, 0, LEAF[3])])];
+  const FAR = [box(5, 4, 5, 0, -2.2, 0, LEAF[0]), box(5, 11, 5, 0, -9, 0, LEAF[1]), box(4, 5, 4, 0, -2.6, 0, LEAF[2]), box(7, 3.2, 7, 0, -0.6, 0, LEAF[3])];
+  const mat = new THREE.MeshLambertMaterial({ vertexColors: true }); farShadowed(mat); worldTex(mat);
+  const SEATP = new THREE.Vector3(10.6, 252, 1.45);
+  const near = [[], [], [], []], far = [[], [], [], []];
+  for (let i = 0; i < T.length; i += 6) { const d = Math.hypot(T[i] - SEATP.x, T[i + 2] - SEATP.z); (d < 750 ? near : far)[T[i + 3]].push(i); }
+  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new THREE.Vector3(), p = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0);
+  const add = (geo, list, place) => { if (!list.length) return; const im = new THREE.InstancedMesh(geo, mat, list.length);
+    list.forEach((i, k) => { place(i); im.setMatrixAt(k, m4); }); im.instanceMatrix.needsUpdate = true; im.frustumCulled = false; im.castShadow = true; im.receiveShadow = true; scene.add(im); WORLD.push(im); };
+  for (let k = 0; k < 4; k++) {
+    const trunkGeo = box(1, 1, 1, 0, 0, 0, LOG[k]);
+    add(trunkGeo, near[k], (i) => { q.setFromAxisAngle(up, 0); sc.set(1, T[i + 4], 1); p.set(T[i], T[i + 1], T[i + 2]); m4.compose(p, q, sc); });
+    add(CAN[k](), near[k], (i) => { q.setFromAxisAngle(up, Math.floor(T[i + 5] * 4) * Math.PI / 2); const h = T[i + 4];
+      sc.set(1, k === 1 ? h / 12 : 1, 1); p.set(T[i], T[i + 1] + h, T[i + 2]); m4.compose(p, q, sc); });
+    add(FAR[k], far[k], (i) => { q.setFromAxisAngle(up, 0); const h = T[i + 4]; sc.set(1, k === 1 ? h / 12 : 1, 1); p.set(T[i], T[i + 1] + h, T[i + 2]); m4.compose(p, q, sc); });
+  }
+}
+// waterfalls: the river runs down its gorge, pours over the lip in a glassy tongue that breaks white, and falls as a
+// curtain of clumps and streaks that rush downward (speeding up as they fall), frays into strands, and is swallowed by
+// its own spray.  Lit by the sun only where the cliff is in sunlight.
+const WFJ = await (await fetch('waterfalls.json')).json();
+const wfMat = new THREE.ShaderMaterial({
+  side: THREE.DoubleSide, transparent: true, depthWrite: false,
+  uniforms: Object.assign({ uTime: U.time, sunDir: { value: SUN_DIR }, sunCol: { value: SUN_COL }, amb: { value: AMB_HI } }, FARU),
+  vertexShader: `attribute vec4 aInfo; varying vec2 vQ; varying vec4 vInfo; varying vec3 vWP;
+    void main(){ vQ = uv; vInfo = aInfo; vec4 wp = modelMatrix * vec4(position, 1.0); vWP = wp.xyz; gl_Position = projectionMatrix * viewMatrix * wp; }`,
+  fragmentShader: COMMON + FAR_GLSL + `uniform float uTime; uniform vec3 sunDir; uniform vec3 sunCol; uniform vec3 amb; varying vec2 vQ; varying vec4 vInfo; varying vec3 vWP;
+    // time a parcel of water has been falling when it is v metres below the lip (drag caps it at ~32 m/s)
+    float tau(float v) { float vv = max(v, 0.0); float t1 = sqrt(2.0 * (vv + 3.0) / 9.81) - 0.78; return vv < 52.0 ? t1 : (sqrt(2.0 * 55.0 / 9.81) - 0.78) + (vv - 52.0) / 32.0; }
+    void main(){
+      float u = vQ.x, v = vQ.y;                         // u across (0..1), v metres below the lip (< 0: still in the gorge)
+      float seed = vInfo.x, width = vInfo.y, kind = vInfo.z, drop = vInfo.w;   // kind 0 a fall, 1 the floating rock's thread, 2 a spring strand
+      float x = u * width;
+      float tt = v < 0.0 ? v / 5.0 : tau(v);           // the gorge water runs at ~5 m/s toward the lip
+      float s = tt - uTime;                             // constant along a parcel's path: patterns ride down with the water
+      float streak = fbm2(vec2(x * 0.30 + seed, s * 0.8));           // long streaks
+      float clump = fbm2(vec2(x * 0.13 + seed * 1.7, s * 2.6));      // lumps of water riding down them
+      float fine = fbm2(vec2(x * 0.9 + seed * 2.0, s * 7.0));
+      float strands = fbm2(vec2(x * 0.05 + seed * 0.5, v * 0.0035 + seed));        // where the curtain is thick or thin
+      float eN = fbm2(vec2(s * 1.3 + seed, u * 3.0)) - 0.5;
+      float ew = mix(0.24, 0.06, smoothstep(0.0, 28.0, v)) + 0.10 * smoothstep(0.0, 300.0, v);   // round shoulders at the lip, fraying lower
+      float edge = smoothstep(0.0, ew, u + 0.07 * eN) * smoothstep(1.0, 1.0 - ew, u - 0.07 * eN);
+      float thick = 0.5 * streak + 0.35 * clump + 0.15 * fine;
+      float lower = smoothstep(drop * 0.35, drop * 0.95, v);
+      float a, white;
+      if (kind > 1.5) {                                 // a spring strand: thin, broken, white
+        a = edge * (0.35 + 0.4 * clump + 0.25 * streak) * smoothstep(0.0, 4.0, v) * (1.0 - smoothstep(drop * 0.3, drop * 0.8, v)) * 0.7;
+        white = 0.75 + 0.25 * fine;
+      } else if (v < 0.0) {                             // the river in the gorge: dark, quick, foam gathering toward the lip
+        white = smoothstep(0.55, 0.8, fine + 0.3 * smoothstep(-10.0, 0.0, v));
+        a = edge;
+      } else {
+        // over the lip it pours in several tongues that merge within ~20 m
+        float tongue = smoothstep(0.22, 0.5, fbm2(vec2(x * 0.08 + seed * 3.0, 0.37 * seed)) + 0.6 * smoothstep(0.0, 24.0, v));
+        float body = clamp(0.4 + 1.2 * strands, 0.0, 1.15);
+        a = edge * tongue * body * smoothstep(0.22, 0.55, thick + 0.18 - 0.25 * lower);
+        a *= 0.7 + 0.3 * smoothstep(0.0, 6.0, v);
+        a -= 0.35 * lower * (1.0 - clump);
+        a = mix(a, a * (0.25 + 1.3 * fine), smoothstep(drop * 0.78, drop, v));
+        if (kind > 0.5) a -= smoothstep(60.0, 240.0, v) * 0.8;
+        float crest = 1.0 - smoothstep(0.0, 8.0, v);
+        white = mix(0.6 + 0.4 * smoothstep(0.4, 0.72, thick), 0.35 + 0.5 * fine, crest);
+      }
+      a = clamp(a, 0.0, 1.0);
+      if (a < 0.02) discard;
+      vec3 c = mix(vec3(0.07, 0.15, 0.17), vec3(0.93, 0.96, 1.0), white);
+      float sh = farVis(vWP);
+      vec3 L = sunCol * 0.24 * sh * (0.3 + 0.7 * white) + amb * (0.40 + 0.28 * white);
+      gl_FragColor = vec4(c * L * a, a);
+    }`
+});
+wfMat.blending = THREE.CustomBlending; wfMat.blendSrc = THREE.OneFactor; wfMat.blendDst = THREE.OneMinusSrcAlphaFactor;
+{
+  const pos = [], uv = [], info = [], idx = [];
+  let base = 0;
+  const strip = (x0, y0, z0, dx, dz, width, v0, drop, seed, fade, spreadK, approach, crownH = 0) => {
+    const NA = approach > 0 ? 4 : 0, NS = 56, NW = 10, tx = -dz, tz = dx;
+    const rows = [];
+    for (let i = 0; i < NA; i++) { const a = -approach * (1 - i / NA); rows.push([a, y0 - a * 0.04, a]); }     // the river, sloping to the lip
+    for (let i = 0; i <= NS; i++) { const k = i / NS, d = drop * Math.pow(k, 2.2);
+      const t = Math.sqrt(2 * d / 9.81), out = v0 * t * (1 - 0.25 * Math.min(1, t / 8));
+      rows.push([out, y0 - d, d]); }
+    for (let r = 0; r < rows.length; r++) {
+      const [out, y, d] = rows[r], spread = 1 + spreadK * Math.max(0, d) / Math.max(drop, 1);
+      for (let j = 0; j <= NW; j++) {
+        const w = (j / NW - 0.5) * width * spread, cu = 2 * j / NW - 1, crown = crownH * (1 - cu * cu) * Math.exp(-Math.max(d, 0) / 6);
+        pos.push(x0 + dx * out + tx * w, y + crown, z0 + dz * out + tz * w);
+        uv.push(j / NW, d); info.push(seed, width * spread, fade, drop);
+      }
+    }
+    for (let i = 0; i < rows.length - 1; i++) for (let j = 0; j < NW; j++) {
+      const a = base + i * (NW + 1) + j, b = a + 1, c = a + NW + 1, d = c + 1;
+      idx.push(a, c, b, b, c, d);
+    }
+    base += rows.length * (NW + 1);
+  };
+  for (const f of WFJ) {
+    const drop = f.y - f.bottom, dx = f.dir[0], dz = f.dir[1], tx = -dz, tz = dx, sd = f.seed * 0.37;
+    if (f.fade) { strip(f.x, f.y, f.z, dx, dz, f.width, 2.5, drop, sd, 1, 0.8, 0); continue; }
+    const v0 = 3.2 + (f.seed % 5) * 0.35;
+    strip(f.x, f.y, f.z, dx, dz, f.width * 0.86, v0, drop, sd, 0, 0.8, 26, 1.0 + f.width * 0.012);
+    // a thinner veil just in front of the main sheet, thrown further out, and the springs breaking out of the rock beside it
+    strip(f.x + dx * 1.5, f.y - 0.5, f.z + dz * 1.5, dx, dz, f.width * 0.5, v0 * 1.3, drop, sd + 41, 0, 1.1, 0, 0.6);
+    (f.strands || []).forEach((q, k) => strip(q[0], q[1], q[2], dx, dz, q[3], 0.7, q[1] - f.bottom, sd + 17 * (k + 1), 2, 2.2, 0));
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setAttribute('aInfo', new THREE.Float32BufferAttribute(info, 4)); g.setIndex(idx);
+  const wf = new THREE.Mesh(g, wfMat); wf.frustumCulled = false; wf.renderOrder = 5; scene.add(wf);
+}
+
+// ------------------------------------------------------------------ the hero (bends, arrows, blood) and the small things
+// ---- the hero: his own skin on the blocky model, three arrows in his chest; elbows, knees and waist bend
+const b64f = s => { const b = atob(s); const u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return new Float32Array(u.buffer); };
+async function ltex(src) { const im = new Image(); im.src = src; await im.decode(); const t = new THREE.Texture(im);
+  t.magFilter = THREE.NearestFilter; t.minFilter = THREE.NearestFilter; t.generateMipmaps = false; t.flipY = false;
+  t.colorSpace = THREE.SRGBColorSpace; t.needsUpdate = true; return t; }
+const HJ = await (await fetch('static.json')).json();
+const htex = await ltex('static_blood.png');
+const hmat = new THREE.MeshLambertMaterial({ map: htex, side: THREE.DoubleSide, alphaTest: 0.1, emissiveMap: htex, emissive: 0xffffff, emissiveIntensity: 0.34 });
+// the same bend as the fight rig: everything past the joint (along the part's y) turns about x by uBend
+function bendMat(joint, dir) {
+  const m = hmat.clone();
+  m.userData.u = { uBend: { value: 0 }, uJoint: { value: joint }, uSoft: { value: 2.2 }, uDir: { value: dir } };
+  m.onBeforeCompile = (sh) => {
+    Object.assign(sh.uniforms, m.userData.u);
+    sh.vertexShader = 'uniform float uBend; uniform float uJoint; uniform float uSoft; uniform float uDir;\n' + sh.vertexShader
+      .replace('#include <beginnormal_vertex>', `#include <beginnormal_vertex>
+        float bw = smoothstep(uJoint - uSoft, uJoint + uSoft, position.y); if (uDir < 0.0) bw = 1.0 - bw;
+        float ba = uBend * bw; float bc = cos(ba), bs = sin(ba);
+        objectNormal = vec3(objectNormal.x, bc * objectNormal.y - bs * objectNormal.z, bs * objectNormal.y + bc * objectNormal.z);`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>
+        { vec3 q = transformed - vec3(0.0, uJoint, 0.0); q = vec3(q.x, bc * q.y - bs * q.z, bs * q.y + bc * q.z); transformed = q + vec3(0.0, uJoint, 0.0); }`);
+  };
+  return m;
+}
+const PB = Object.fromEntries(HJ.bones.map(b => [b.name, b]));
+const Gp = (parent, x, y, z, order) => { const g = new THREE.Group(); g.rotation.order = order || 'ZYX'; g.position.set(x, y, z); parent.add(g); return g; };
+const H = {};
+H.root = new THREE.Group(); scene.add(H.root);
+H.tilt = Gp(H.root, 0, 0, 0, 'XYZ'); H.S = Gp(H.tilt, 0, 0, 0); H.C = Gp(H.S, 0, -24.016, 0);
+H.hips = Gp(H.C, 0, 12, 0); H.right_leg = Gp(H.hips, -1.9, 0, 0); H.left_leg = Gp(H.hips, 1.9, 0, 0);
+H.waist = Gp(H.hips, 0, -6, 0); H.top = Gp(H.waist, 0, -6, 0); H.head = Gp(H.top, 0, 0, 0);
+H.right_arm = Gp(H.top, -5, HJ.arm_y, 0); H.left_arm = Gp(H.top, 5, HJ.arm_y, 0);
+const BM = {};
+const hpart = (g, part, joint, dir, off) => { const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(b64f(PB[part].pos), 3)); geo.setAttribute('normal', new THREE.BufferAttribute(b64f(PB[part].nrm), 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(b64f(PB[part].uv), 2));
+  const mat = bendMat(joint, dir); BM[part] = mat;
+  const m = new THREE.Mesh(geo, mat); m.castShadow = false; m.receiveShadow = true; m.frustumCulled = false; if (off) m.position.set(...off); g.add(m); return m; };
+hpart(H.right_leg, 'right_leg', 6, 1); hpart(H.left_leg, 'left_leg', 6, 1); hpart(H.hips, 'body', 6, -1, [0, -12, 0]); hpart(H.head, 'head', 0, 1);
+hpart(H.right_arm, 'right_arm', 4, 1); hpart(H.left_arm, 'left_arm', 4, 1);
+// arrows: hung on the hips and moved each frame with the body's own bend, so they stay seated in the shirt
+const shaftM = new THREE.MeshLambertMaterial({ color: 0x7a5a36 }), fletchM = new THREE.MeshLambertMaterial({ color: 0xe8e4dc, side: THREE.DoubleSide });
+const wetM = new THREE.MeshLambertMaterial({ color: 0x2a0406, emissive: 0x060000 });
+const ARROWS = [];
+for (const [x, y, rx, ry] of HJ.arrows || [[-1.6, 3.2, 0.10, 0.18], [1.9, 5.6, -0.08, -0.22], [0.3, 8.2, 0.16, 0.05]]) {
+  const a = Gp(H.hips, 0, 0, 0);
+  const inner = Gp(a, 0, 0, 0); inner.rotation.set(rx, ry, 0);
+  const sh = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.45, 11), shaftM); sh.position.z = -4.6; inner.add(sh);
+  for (const r of [0, Math.PI / 2]) { const f = new THREE.Mesh(new THREE.PlaneGeometry(2.0, 2.6), fletchM); f.rotation.set(0, Math.PI / 2, r); f.position.z = -9.2; inner.add(f); }
+  const wet = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.62, 1.6), wetM); wet.position.z = -0.55; inner.add(wet);   // the shaft's bloody first few cm
+  ARROWS.push({ g: a, base: new THREE.Vector3(x, y - 12, -2.0) });
+}
+const _q = new THREE.Quaternion(), _ax = new THREE.Vector3(1, 0, 0), _piv = new THREE.Vector3(0, -6, 0), _v = new THREE.Vector3();
+const sstep = (a, b, x) => { const t = Math.min(Math.max((x - a) / (b - a), 0), 1); return t * t * (3 - 2 * t); };
+window.poseHero = (p) => {
+  H.root.position.set(...p.root.slice(0, 3)); H.root.rotation.y = p.root[3] * Math.PI / 180;
+  H.tilt.rotation.set(-p.root[4], 0, p.root[5]); H.S.scale.set(-p.scale / 16, -p.scale / 16, p.scale / 16);
+  H.hips.position.set(p.hips[0], 12 + p.hips[1], p.hips[2]); H.hips.rotation.set(p.hips[3], p.hips[4], p.hips[5]);
+  H.waist.rotation.set(...p.waist); BM.body.userData.u.uBend.value = p.waist[0];
+  H.head.rotation.set(...p.head);
+  for (const s of ['right', 'left']) {
+    H[s + '_arm'].rotation.set(...p[s + '_arm']); BM[s + '_arm'].userData.u.uBend.value = p[s + '_elbow'];
+    H[s + '_leg'].rotation.set(...p[s + '_leg']); BM[s + '_leg'].userData.u.uBend.value = p[s + '_knee'];
+  }
+  for (const A of ARROWS) {        // body mesh y (0 at the shoulders) = base.y + 12; weight as in the shader
+    const w = 1 - sstep(6 - 2.2, 6 + 2.2, A.base.y + 12), ang = p.waist[0] * w;
+    _q.setFromAxisAngle(_ax, ang);
+    _v.copy(A.base).sub(_piv).applyQuaternion(_q).add(_piv);
+    A.g.position.copy(_v); A.g.quaternion.copy(_q);
+  }
+};
+// ---- blood: falling drops and the spots they leave
+const MAXDROP = 64, MAXSPLAT = 220;
+const drops = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshLambertMaterial({ color: 0x9a0c12, emissive: 0x3a0306 }), MAXDROP);
+drops.frustumCulled = false; drops.count = 0; scene.add(drops);
+function splatTex() {
+  const c = document.createElement('canvas'); c.width = c.height = 16; const g = c.getContext('2d');
+  let r = 17; const rnd = () => (r = (r * 16807) % 2147483647) / 2147483647;
+  const on = new Set();
+  const put = (x, y) => { if (x >= 0 && y >= 0 && x < 16 && y < 16) on.add(x + ',' + y); };
+  for (let y = 5; y <= 10; y++) for (let x = 5; x <= 10; x++) if (Math.hypot(x - 7.5, y - 7.5) < 2.9 + rnd() * 0.8) put(x, y);
+  for (let k = 0; k < 6; k++) { const a = rnd() * 6.28, d = 3.6 + rnd() * 3.2; put(Math.round(7.5 + Math.cos(a) * d), Math.round(7.5 + Math.sin(a) * d)); }
+  for (const s of on) { const [x, y] = s.split(',').map(Number); const k = rnd();
+    g.fillStyle = k < 0.4 ? '#4e0508' : k < 0.8 ? '#64080c' : '#7a0c12'; g.fillRect(x, y, 1, 1); }
+  const t = new THREE.CanvasTexture(c); t.magFilter = THREE.NearestFilter; t.minFilter = THREE.NearestFilter; t.generateMipmaps = false;
+  t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+const splatGeo = new THREE.PlaneGeometry(1, 1); splatGeo.rotateX(-Math.PI / 2);
+const splats = new THREE.InstancedMesh(splatGeo, new THREE.MeshLambertMaterial({ map: splatTex(), alphaTest: 0.5, emissive: 0x1a0002,
+  polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }), MAXSPLAT);
+splats.frustumCulled = false; splats.count = 0; splats.receiveShadow = true; scene.add(splats);
+const _d = new THREE.Object3D();
+function updateBlood(v) {
+  const D = v.drops || [], P = v.splats || [];
+  drops.count = Math.min(D.length, MAXDROP);
+  for (let i = 0; i < drops.count; i++) { const d = D[i]; _d.position.set(d[0], d[1], d[2]); _d.rotation.set(0, 0, 0); _d.scale.set(d[3], d[4], d[3]); _d.updateMatrix(); drops.setMatrixAt(i, _d.matrix); }
+  drops.instanceMatrix.needsUpdate = true;
+  splats.count = Math.min(P.length, MAXSPLAT);
+  for (let i = 0; i < splats.count; i++) { const s = P[i]; _d.position.set(s[0], s[1], s[2]); _d.rotation.set(0, s[4], 0); _d.scale.set(s[3], 1, s[3]); _d.updateMatrix(); splats.setMatrixAt(i, _d.matrix); }
+  splats.instanceMatrix.needsUpdate = true;
+}
+
+// cherry petals round the tree, and birds out over the clouds
+const NP = 110, petalGeo = new THREE.PlaneGeometry(0.065, 0.05);
+const petals = new THREE.InstancedMesh(petalGeo, new THREE.MeshLambertMaterial({ color: 0xffd0e0, emissive: 0x4a2030, side: THREE.DoubleSide }), NP);
+petals.frustumCulled = false; scene.add(petals);
+const PS = []; { let r = 99; const rnd = () => (r = (r * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < NP; i++) PS.push([rnd() * 10 - 8, rnd() * 7, rnd() * 10 - 5, rnd() * 6.28, 0.16 + rnd() * 0.16, rnd()]); }
+const dmy = new THREE.Object3D();
+function updatePetals(t, c, lens) {
+  for (let i = 0; i < NP; i++) { const [px, py, pz, ph, sp, k] = PS[i];
+    const life = 7.0, u = ((t * sp / 1.8 + k) % 1.0);
+    const y = c[1] + 5.5 - u * life;
+    const x = c[0] + px - u * 3.2 + 0.25 * Math.sin(t * 1.3 + ph);
+    const z = c[2] + pz + 0.3 * Math.sin(t * 0.9 + ph * 2);
+    let px_ = x, py_ = y + py * 0.15, pz_ = z; const dx = x - lens[0], dy = py_ - lens[1], dz = z - lens[2], dd = Math.hypot(dx, dy, dz);
+    if (dd < 1.6) { const k2 = 1.6 / (dd + 1e-6); px_ = lens[0] + dx * k2; py_ = lens[1] + dy * k2; pz_ = lens[2] + dz * k2; }
+    dmy.position.set(px_, py_, pz_); dmy.rotation.set(t * 1.4 + ph, t * 1.1 + ph * 1.3, t * 0.6);
+    dmy.updateMatrix(); petals.setMatrixAt(i, dmy.matrix); }
+  petals.instanceMatrix.needsUpdate = true;
+}
+const NB = 9, birdGeo = new THREE.BufferGeometry();
+birdGeo.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, -1, 0.35, -0.3, -0.15, 0, 0.1, 0, 0, 0, 1, 0.35, -0.3, 0.15, 0, 0.1], 3));
+const birds = new THREE.InstancedMesh(birdGeo, new THREE.MeshBasicMaterial({ color: 0x1a1420, side: THREE.DoubleSide }), NB);
+birds.frustumCulled = false; scene.add(birds);
+function updateBirds(t) {
+  for (let i = 0; i < NB; i++) {
+    const ph = i * 1.37, cx = -260 - 70 * i, cy = 300 + 22 * Math.sin(i * 2.1), cz = -120 + 50 * i;
+    dmy.position.set(cx + 6 * Math.sin(ph), cy + 2 * Math.sin(t * 0.8 + ph), cz - 8 * t + 4 * Math.sin(t * 0.5 + ph));
+    dmy.rotation.set(0, Math.PI / 2 + 0.2 * Math.sin(ph), 0);
+    const flap = 0.55 + 0.45 * Math.sin(t * 7.5 + ph * 3);
+    dmy.scale.set(2.2, 2.2 * flap, 2.2); dmy.updateMatrix(); birds.setMatrixAt(i, dmy.matrix);
+  }
+  birds.instanceMatrix.needsUpdate = true;
+}
+const NFF = 150;
+const ffGeo = new THREE.BufferGeometry(); ffGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(NFF * 3), 3));
+ffGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(NFF * 3), 3));
+const ffTex = (() => { const c = document.createElement('canvas'); c.width = c.height = 32; const g = c.getContext('2d');
+  const gr = g.createRadialGradient(16, 16, 0, 16, 16, 16); gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.25, 'rgba(255,255,255,0.6)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, 32, 32); return new THREE.CanvasTexture(c); })();
+const fireflies = new THREE.Points(ffGeo, new THREE.PointsMaterial({ size: 0.075, map: ffTex, vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, sizeAttenuation: true }));
+fireflies.frustumCulled = false; scene.add(fireflies);
+const FF = []; { let r = 31; const rnd = () => (r = (r * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < NFF; i++) { const out = i > 90; FF.push([out ? -6 - rnd() * 30 : 4 + rnd() * 13, out ? 238 + rnd() * 16 : 251.3 + rnd() * 4.2, -9 + rnd() * 20, rnd() * 6.28, 0.3 + rnd() * 0.5, rnd()]); } }
+function updateFireflies(t) {
+  const P = ffGeo.attributes.position.array, C = ffGeo.attributes.color.array;
+  for (let i = 0; i < NFF; i++) { const [x, y, z, ph, sp, k] = FF[i];
+    P[i * 3] = x + 0.8 * Math.sin(t * sp + ph) + 0.3 * Math.sin(t * 1.7 * sp + ph * 2); P[i * 3 + 1] = y + 0.35 * Math.sin(t * 0.8 * sp + ph * 3) + 0.15 * t * (k - 0.3);
+    P[i * 3 + 2] = z + 0.8 * Math.cos(t * 0.9 * sp + ph * 1.3);
+    const blink = Math.max(0, Math.sin(t * (1.1 + k) + ph * 5)) ** 3; const b = 0.4 + 4.5 * blink;
+    C[i * 3] = 1.0 * b; C[i * 3 + 1] = 0.95 * b; C[i * 3 + 2] = 0.35 * b; }
+  ffGeo.attributes.position.needsUpdate = true; ffGeo.attributes.color.needsUpdate = true;
+}
+const HEADMESH = H.head.children[0];
+const eyeFill = new THREE.PointLight(0xffd6c0, 0.9, 2.6, 2.0); scene.add(eyeFill);
+
+// ------------------------------------------------------------------ cloud noise: tileable Perlin-Worley + Worley octaves (3D), coverage map (2D)
+function makeNoise3D(N) {
+  const data = new Uint8Array(N * N * N * 4);
+  const h3 = (x, y, z, s) => { let h = (x * 374761393 + y * 668265263 + z * 1274126177 + s * 2246822519) | 0; h = Math.imul(h ^ (h >>> 13), 1274126177); h ^= h >>> 16; return (h >>> 0) / 4294967296; };
+  function worley(px, py, pz, cells, s) {
+    const fx = px * cells, fy = py * cells, fz = pz * cells, ix = Math.floor(fx), iy = Math.floor(fy), iz = Math.floor(fz);
+    let best = 9;
+    for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) {
+      const cx = ix + a, cy = iy + b, cz = iz + c;
+      const wx = ((cx % cells) + cells) % cells, wy = ((cy % cells) + cells) % cells, wz = ((cz % cells) + cells) % cells;
+      const ox = cx + h3(wx, wy, wz, s), oy = cy + h3(wx, wy, wz, s + 1), oz = cz + h3(wx, wy, wz, s + 2);
+      const d = (ox - fx) ** 2 + (oy - fy) ** 2 + (oz - fz) ** 2; if (d < best) best = d;
+    }
+    return 1 - Math.min(Math.sqrt(best), 1);
+  }
+  function vnoise(px, py, pz, cells, s) {
+    const fx = px * cells, fy = py * cells, fz = pz * cells, ix = Math.floor(fx), iy = Math.floor(fy), iz = Math.floor(fz);
+    const tx = fx - ix, ty = fy - iy, tz = fz - iz, sx = tx * tx * (3 - 2 * tx), sy = ty * ty * (3 - 2 * ty), sz = tz * tz * (3 - 2 * tz);
+    const v = (a, b, c) => h3(((ix + a) % cells + cells) % cells, ((iy + b) % cells + cells) % cells, ((iz + c) % cells + cells) % cells, s);
+    const l = (a, b, t) => a + (b - a) * t;
+    return l(l(l(v(0, 0, 0), v(1, 0, 0), sx), l(v(0, 1, 0), v(1, 1, 0), sx), sy), l(l(v(0, 0, 1), v(1, 0, 1), sx), l(v(0, 1, 1), v(1, 1, 1), sx), sy), sz);
+  }
+  for (let z = 0; z < N; z++) for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+    const px = (x + 0.5) / N, py = (y + 0.5) / N, pz = (z + 0.5) / N;
+    const pf = 0.5 * vnoise(px, py, pz, 4, 1) + 0.25 * vnoise(px, py, pz, 8, 2) + 0.125 * vnoise(px, py, pz, 16, 3) + 0.0625 * vnoise(px, py, pz, 32, 4);
+    const w1 = worley(px, py, pz, 4, 10), w2 = worley(px, py, pz, 8, 20), w3 = worley(px, py, pz, 16, 30);
+    const wf = w1 * 0.625 + w2 * 0.25 + w3 * 0.125;
+    const pw = Math.min(Math.max((pf / 0.9375 - (1 - wf)) / (1 - (1 - wf) + 1e-3), 0), 1);   // Perlin-Worley: remap Perlin by Worley
+    const i = ((z * N + y) * N + x) * 4;
+    data[i] = pw * 255; data[i + 1] = w2 * 255; data[i + 2] = w3 * 255; data[i + 3] = worley(px, py, pz, 32, 40) * 255;
+  }
+  const t = new THREE.Data3DTexture(data, N, N, N);
+  t.format = THREE.RGBAFormat; t.type = THREE.UnsignedByteType; t.minFilter = t.magFilter = THREE.LinearFilter;
+  t.wrapS = t.wrapT = t.wrapR = THREE.RepeatWrapping; t.unpackAlignment = 1; t.needsUpdate = true; return t;
+}
+function makeWeather(N) {
+  const data = new Uint8Array(N * N * 4);
+  const h2 = (x, y, s) => { let h = (x * 374761393 + y * 668265263 + s * 2246822519) | 0; h = Math.imul(h ^ (h >>> 13), 1274126177); h ^= h >>> 16; return (h >>> 0) / 4294967296; };
+  const vn = (x, y, c, s) => { const ix = Math.floor(x * c), iy = Math.floor(y * c), tx = x * c - ix, ty = y * c - iy, sx = tx * tx * (3 - 2 * tx), sy = ty * ty * (3 - 2 * ty);
+    const v = (a, b) => h2((ix + a) % c, (iy + b) % c, s); return (v(0, 0) * (1 - sx) + v(1, 0) * sx) * (1 - sy) + (v(0, 1) * (1 - sx) + v(1, 1) * sx) * sy; };
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+    const u = x / N, v = y / N; const i = (y * N + x) * 4;
+    const f = (s) => 0.5 * vn(u, v, 4, s) + 0.25 * vn(u, v, 8, s + 1) + 0.15 * vn(u, v, 16, s + 2) + 0.1 * vn(u, v, 32, s + 3);
+    data[i] = f(1) * 255; data[i + 1] = f(7) * 255; data[i + 2] = f(13) * 255; data[i + 3] = 255;
+  }
+  const t = new THREE.DataTexture(data, N, N, THREE.RGBAFormat); t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.minFilter = t.magFilter = THREE.LinearFilter; t.needsUpdate = true; return t;
+}
+const NOISE = makeNoise3D(64), WEATHER = makeWeather(512);
+
+// ------------------------------------------------------------------ post passes
+const fsScene = new THREE.Scene(), fsCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const fsQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2)); fsQuad.frustumCulled = false; fsScene.add(fsQuad);
+const FSV = `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
+function pass(mat, target) { fsQuad.material = mat; renderer.setRenderTarget(target); renderer.render(fsScene, fsCam); }
+const RT = {};
+function rt(w, h, depth) { const r = new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, depthBuffer: !!depth });
+  if (depth) { r.depthTexture = new THREE.DepthTexture(w, h, THREE.FloatType); } return r; }
+function ensureRTs(w, h) {
+  if (RT.w === w && RT.h === h) return;
+  for (const k of Object.keys(RT)) if (RT[k] && RT[k].dispose) RT[k].dispose();
+  RT.w = w; RT.h = h;
+  RT.scene = rt(w, h, true); RT.vol = rt(Math.ceil(w / 2), Math.ceil(h / 2)); RT.comp = rt(w, h);
+  RT.god = rt(Math.ceil(w / 4), Math.ceil(h / 4));
+  RT.blm = []; let bw = w, bh = h; for (let i = 0; i < 6; i++) { bw = Math.max(1, Math.ceil(bw / 2)); bh = Math.max(1, Math.ceil(bh / 2)); RT.blm.push(rt(bw, bh)); }
+  RT.blmU = RT.blm.map(r => rt(r.width, r.height));
+}
+const CAMU = { tDepth: { value: null }, invProj: { value: new THREE.Matrix4() }, camWorld: { value: new THREE.Matrix4() }, camPos: { value: new THREE.Vector3() },
+  near: { value: 0.05 }, far: { value: 40000 } };
+const RAY = `
+uniform sampler2D tDepth; uniform mat4 invProj; uniform mat4 camWorld; uniform vec3 camPos; uniform float near; uniform float far;
+vec3 viewDir(vec2 uv) { vec4 v = invProj * vec4(uv * 2.0 - 1.0, 1.0, 1.0); return normalize(v.xyz / v.w); }
+float sceneDist(vec2 uv, vec3 vd) { float d = texture2D(tDepth, uv).r; if (d >= 0.999999) return 1e9;
+  float vz = (near * far) / ((far - near) * d - far); return vz / vd.z; }
+`;
+const volMat = new THREE.ShaderMaterial({
+  uniforms: Object.assign({}, CAMU, FARU, { falls: { value: (meta.fall_bases || []).map(f => new THREE.Vector4(...f)).concat(Array(8).fill(new THREE.Vector4(0, -9999, 0, 0))).slice(0, 8) }, tNoise: { value: NOISE }, tWeather: { value: WEATHER }, sunDir: { value: SUN_DIR }, sunCol: { value: SUN_COL },
+    ambHi: { value: AMB_HI }, ambLo: { value: AMB_LO }, uTime: U.time, frame: { value: 0 }, res: { value: new THREE.Vector2() } }),
+  vertexShader: FSV,
+  fragmentShader: `precision highp sampler3D;
+  uniform sampler3D tNoise; uniform sampler2D tWeather; uniform vec3 sunDir; uniform vec3 sunCol; uniform vec3 ambHi; uniform vec3 ambLo;
+  uniform float uTime; uniform float frame; uniform vec2 res; uniform vec4 falls[8]; varying vec2 vUv;` + RAY + FAR_GLSL + COMMON + `
+  const float SEA_LO = ${CLOUD_LO.toFixed(1)}, SEA_HI = ${CLOUD_HI.toFixed(1)};
+  float remap(float v, float a, float b, float c, float d) { return c + (v - a) / (b - a) * (d - c); }
+  float seaDensity(vec3 p, bool cheap) {
+    float plume = 0.0;
+    for (int i = 0; i < 8; i++) { vec4 f = falls[i]; if (f.y < -9000.0) continue;
+      vec3 q = p - f.xyz; float r = 60.0 + f.w * 1.5; plume += 2.6 * exp(-dot(q.xz, q.xz) / (r * r) - max(q.y, 0.0) / (110.0 + f.w)) * (1.0 - smoothstep(0.0, 40.0, -q.y)); }
+    vec4 w = texture2D(tWeather, p.xz / 5000.0 + 0.31);
+    float top = SEA_HI + 22.0 * (w.g - 0.5);
+    float h = (p.y - SEA_LO) / (top - SEA_LO);
+    if ((h < 0.0 || h > 1.0) && plume < 0.02) return 0.0;
+    h = clamp(h, 0.0, 1.0);
+    float cov = clamp(0.30 + 0.75 * (w.r - 0.5), 0.0, 1.0);
+    float shape = cov * smoothstep(0.0, 0.1, h) * (1.0 - smoothstep(0.35, 1.0, h));
+    vec4 n = texture(tNoise, p * vec3(0.0045, 0.009, 0.0045) + vec3(uTime * 0.0015, 0.0, uTime * 0.0008));
+    float d = remap(shape, (1.0 - n.r) * 0.7, 1.0, 0.0, 1.0);
+    if (!cheap && d > 0.0) { vec4 m = texture(tNoise, p * 0.024 + vec3(0.0, -uTime * 0.004, uTime * 0.002)); d -= (1.0 - d) * (m.g * 0.55 + m.b * 0.3) * 0.7; }
+    if (plume > 0.02) { vec4 m2 = texture(tNoise, p * 0.012 + vec3(0.0, -uTime * 0.05, 0.0)); vec4 m3 = texture(tNoise, p * 0.035 + vec3(uTime * 0.02, -uTime * 0.12, 0.0)); d = max(d, plume * (0.45 + 0.55 * m2.r + 0.35 * (m3.g - 0.5))); }
+    return max(d, 0.0) * 0.55;
+  }
+  float hiDensity(vec3 p, bool cheap) {
+    float lo = 2600.0, hi = 3150.0;
+    float h = (p.y - lo) / (hi - lo); if (h < 0.0 || h > 1.0) return 0.0;
+    vec4 w = texture2D(tWeather, p.xz / 16000.0 + 0.77);
+    float cov = smoothstep(0.50, 0.84, w.b) * 0.85;
+    float shape = cov * smoothstep(0.0, 0.12, h) * (1.0 - smoothstep(0.3, 1.0, h));
+    vec4 n = texture(tNoise, p * 0.0011 + vec3(uTime * 0.0004, 0.0, 0.0));
+    float d = remap(shape, (1.0 - n.r) * 0.7, 1.0, 0.0, 1.0);
+    if (!cheap && d > 0.0) { vec4 m = texture(tNoise, p * 0.0052); d -= (1.0 - d) * (m.g * 0.6 + m.b * 0.4) * 0.6; }
+    return max(d, 0.0);
+  }
+  float lightOD(vec3 p, bool sea) {
+    float od = 0.0, st = sea ? 6.0 : 60.0; vec3 q = p;
+    for (int i = 0; i < 4; i++) { q += sunDir * st; od += (sea ? seaDensity(q, true) : hiDensity(q, true)) * st; st *= 2.6; }
+    return od;
+  }
+  // multiple scattering as decaying octaves (Wrenninge; the same idea as Photon's cumulus loop)
+  float msPhase(float cosT, float tauL, float dens) {
+    float a = 1.0, b = 1.0, c = 1.0, s = 0.0;
+    float powder = 3.14159 * dens / (dens + 0.15); powder = mix(powder, 1.0, 0.8 * pow(cosT * 0.5 + 0.5, 2.0));
+    for (int o = 0; o < 4; o++) {
+      float ph = 0.8 * max(hg(cosT, 0.8 * c), hg(cosT, 0.35 * c)) + 0.2 * hg(cosT, -0.2 * c);
+      s += a * exp(-b * tauL) * ph;
+      a *= 0.55 * powder; b *= 0.4; c *= 0.7;
+      powder = mix(powder, sqrt(powder), 0.5);
+    }
+    return s;
+  }
+  float ign(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)) + frame * 0.618)); }
+  vec4 fogSeg(vec3 ro, vec3 rd, float t0, float t1, float jit, float cosT) {
+    vec3 S = vec3(0.0); float T = 1.0;
+    if (t1 <= t0) return vec4(S, T);
+    float dt = (t1 - t0) / 10.0;
+    for (int i = 0; i < 10; i++) {
+      float t = t0 + (float(i) + jit) * dt; vec3 p = ro + rd * t;
+      float dens = 0.00005 * exp(-max(p.y - 64.0, 0.0) / 650.0) + 0.00012 * (1.0 - smoothstep(64.0, 150.0, p.y));
+      float vis = farVis(p);
+      vec3 L = sunCol * vis * (hg(cosT, 0.70) * 4.0 + 0.08) + mix(ambLo, ambHi, 0.6) * 0.65;
+      float st = exp(-dens * dt);
+      S += T * L * (1.0 - st); T *= st;
+    }
+    return vec4(S, T);
+  }
+  void main(){
+    vec3 vd = viewDir(vUv);
+    vec3 rd = normalize((camWorld * vec4(vd, 0.0)).xyz);
+    float tS = sceneDist(vUv, vd);
+    float jit = ign(gl_FragCoord.xy);
+    float cosT = dot(rd, sunDir);
+    vec3 ro = camPos;
+    // ---- clouds
+    vec3 cS = vec3(0.0); float cT = 1.0; float tc = -1.0, wsum = 0.0;
+    bool sea = rd.y < 0.0;
+    float lo = sea ? SEA_LO : 2600.0, hi = sea ? SEA_HI + 60.0 : 3150.0;
+    float ta = (hi - ro.y) / rd.y, tb = (lo - ro.y) / rd.y;
+    if (abs(rd.y) > 1e-4) {
+      float t0 = max(min(ta, tb), 0.0), t1 = min(max(ta, tb), min(tS, sea ? 14000.0 : 40000.0));
+      if (t1 > t0) {
+        int N = sea ? 36 : 22;
+        float L = t1 - t0; float dt = L / float(N);
+        float sig = sea ? 0.03 : 0.008;
+        for (int i = 0; i < 36; i++) {
+          if (i >= N || cT < 0.02) break;
+          float t = t0 + (float(i) + jit) * dt; vec3 p = ro + rd * t;
+          float d = sea ? seaDensity(p, false) : hiDensity(p, false);
+          if (d <= 0.0) continue;
+          float tauL = lightOD(p, sea) * sig;
+          float vis = sea ? farVis(p + sunDir * 2.0) : 1.0;
+          float h = sea ? clamp((p.y - SEA_LO) / (SEA_HI - SEA_LO), 0.0, 1.0) : clamp((p.y - 2600.0) / 550.0, 0.0, 1.0);
+          vec3 Ls = sunCol * (sea ? 1.9 : 2.2) * msPhase(cosT, tauL, d) * vis;
+          vec3 La = mix(ambLo * 0.16, ambHi * 0.70, h) * (0.22 + 0.78 * h) * (sea ? 0.85 : 0.8);
+          float se = d * sig; float st = exp(-se * dt);
+          vec3 Lt = Ls + La;
+          cS += cT * Lt * (1.0 - st);
+          wsum += cT * (1.0 - st); tc = (tc < 0.0 ? 0.0 : tc) + t * cT * (1.0 - st);
+          cT *= st;
+        }
+      }
+    }
+    float tcd = wsum > 1e-4 ? tc / wsum : min(tS, 20000.0);
+    float tMax = min(tS, 20000.0);
+    vec4 fa = fogSeg(ro, rd, 0.0, min(tcd, tMax), jit, cosT);
+    vec4 fb = fogSeg(ro, rd, min(tcd, tMax), tMax, jit, cosT);
+    vec3 S = fa.rgb + fa.a * (cS + cT * fb.rgb);
+    float T = fa.a * cT * fb.a;
+    gl_FragColor = vec4(S, T);
+  }`
+});
+const compMat = new THREE.ShaderMaterial({
+  uniforms: Object.assign({}, CAMU, { tScene: { value: null }, tVol: { value: null }, volRes: { value: new THREE.Vector2() } }),
+  vertexShader: FSV,
+  fragmentShader: `uniform sampler2D tScene; uniform sampler2D tVol; uniform vec2 volRes; varying vec2 vUv;` + RAY + `
+  void main(){
+    vec3 vd = viewDir(vUv); float t = min(sceneDist(vUv, vd), 30000.0);
+    // depth-aware upsample of the half-res volumetrics
+    vec2 f = vUv * volRes - 0.5; vec2 i0 = floor(f); vec2 fr = f - i0;
+    vec4 acc = vec4(0.0); float wsum = 0.0;
+    for (int k = 0; k < 4; k++) {
+      vec2 o = vec2(float(k % 2), float(k / 2)); vec2 uvk = (i0 + o + 0.5) / volRes;
+      vec3 vdk = viewDir(uvk); float tk = min(sceneDist(uvk, vdk), 30000.0);
+      float wb = (o.x > 0.5 ? fr.x : 1.0 - fr.x) * (o.y > 0.5 ? fr.y : 1.0 - fr.y);
+      float w = wb / (abs(tk - t) / max(t, 1.0) * 40.0 + 0.02);
+      acc += texture2D(tVol, uvk) * w; wsum += w;
+    }
+    vec4 v = acc / max(wsum, 1e-5);
+    vec3 c = texture2D(tScene, vUv).rgb * v.a + v.rgb;
+    gl_FragColor = vec4(c, 1.0);
+  }`
+});
+const godMat = new THREE.ShaderMaterial({
+  uniforms: Object.assign({}, CAMU, { tComp: { value: null }, sunUv: { value: new THREE.Vector2() }, strength: { value: 0 } }),
+  vertexShader: FSV,
+  fragmentShader: `uniform sampler2D tComp; uniform vec2 sunUv; uniform float strength; varying vec2 vUv;` + RAY + `
+  void main(){
+    vec2 d = (sunUv - vUv) / 56.0; vec2 p = vUv; vec3 s = vec3(0.0); float w = 1.0;
+    for (int i = 0; i < 56; i++) {
+      vec3 c = texture2D(tComp, p).rgb; float sky = texture2D(tDepth, p).r >= 0.999999 ? 1.0 : 0.0;
+      float l = dot(c, vec3(0.3, 0.5, 0.2));
+      s += c * smoothstep(2.0, 9.0, l) * sky * w; w *= 0.965; p += d;
+    }
+    gl_FragColor = vec4(s / 56.0 * strength, 1.0);
+  }`
+});
+const downMat = new THREE.ShaderMaterial({ uniforms: { tSrc: { value: null }, texel: { value: new THREE.Vector2() }, first: { value: 0 } }, vertexShader: FSV,
+  fragmentShader: `uniform sampler2D tSrc; uniform vec2 texel; uniform float first; varying vec2 vUv;
+  vec3 s(vec2 o){ vec3 c = texture2D(tSrc, vUv + o * texel).rgb; if (first > 0.5) c = min(c, vec3(60.0)); return c; }
+  void main(){ vec3 c = s(vec2(0.0)) * 0.25 + (s(vec2(-1.0, -1.0)) + s(vec2(1.0, -1.0)) + s(vec2(-1.0, 1.0)) + s(vec2(1.0, 1.0))) * 0.125
+    + (s(vec2(-2.0, 0.0)) + s(vec2(2.0, 0.0)) + s(vec2(0.0, -2.0)) + s(vec2(0.0, 2.0))) * 0.0625; gl_FragColor = vec4(c, 1.0); }` });
+const upMat = new THREE.ShaderMaterial({ uniforms: { tLow: { value: null }, tHigh: { value: null }, texel: { value: new THREE.Vector2() } }, vertexShader: FSV,
+  fragmentShader: `uniform sampler2D tLow; uniform sampler2D tHigh; uniform vec2 texel; varying vec2 vUv;
+  void main(){ vec3 c = vec3(0.0);
+    for (int i = -1; i <= 1; i++) for (int j = -1; j <= 1; j++) c += texture2D(tLow, vUv + vec2(float(i), float(j)) * texel).rgb * (i == 0 && j == 0 ? 0.25 : (i == 0 || j == 0 ? 0.125 : 0.0625));
+    gl_FragColor = vec4(c + texture2D(tHigh, vUv).rgb, 1.0); }` });
+const finalMat = new THREE.ShaderMaterial({
+  uniforms: { tComp: { value: null }, tBloom: { value: null }, tGod: { value: null }, exposure: { value: 1.0 }, texel: { value: new THREE.Vector2() },
+    bloomK: { value: 0.07 }, godTint: { value: new THREE.Vector3(1.0, 0.72, 0.45) } },
+  vertexShader: FSV,
+  fragmentShader: `uniform sampler2D tComp; uniform sampler2D tBloom; uniform sampler2D tGod; uniform float exposure; uniform vec2 texel; uniform float bloomK; uniform vec3 godTint; varying vec2 vUv;
+  vec3 lottes(vec3 x) {                    // Timothy Lottes 2016, as Photon ships it by default
+    const vec3 a = vec3(1.5), d = vec3(0.91), hdrMax = vec3(8.0), midIn = vec3(0.26), midOut = vec3(0.32);
+    vec3 b = (-pow(midIn, a) + pow(hdrMax, a) * midOut) / ((pow(hdrMax, a * d) - pow(midIn, a * d)) * midOut);
+    vec3 c = (pow(hdrMax, a * d) * pow(midIn, a) - pow(hdrMax, a) * pow(midIn, a * d) * midOut) / ((pow(hdrMax, a * d) - pow(midIn, a * d)) * midOut);
+    return pow(x, a) / (pow(x, a * d) * b + c); }
+  vec3 hdr(vec2 uv) { return texture2D(tComp, uv).rgb + texture2D(tBloom, uv).rgb * bloomK + texture2D(tGod, uv).rgb * godTint; }
+  vec3 grade(vec3 c) {
+    c = max(c * exposure, 0.0);
+    c = lottes(c);
+    float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    float sat = max(c.r, max(c.g, c.b)) - min(c.r, min(c.g, c.b));
+    c = mix(vec3(l), c, 1.28 + 0.30 * (1.0 - smoothstep(0.0, 0.5, sat)));          // vibrance
+    c += vec3(0.035, 0.012, -0.025) * smoothstep(0.35, 0.9, l) + vec3(-0.016, 0.006, 0.018) * (1.0 - smoothstep(0.0, 0.35, l));
+    c = c + 0.18 * (c * c * (3.0 - 2.0 * c) - c);
+    return clamp(c, 0.0, 1.0); }
+  float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+  void main(){
+    // FXAA-lite on the graded image
+    vec3 cM = grade(hdr(vUv)), cN = grade(hdr(vUv + vec2(0.0, texel.y))), cS = grade(hdr(vUv - vec2(0.0, texel.y)));
+    vec3 cE = grade(hdr(vUv + vec2(texel.x, 0.0))), cW = grade(hdr(vUv - vec2(texel.x, 0.0)));
+    float lM = luma(cM), lN = luma(cN), lS = luma(cS), lE = luma(cE), lW = luma(cW);
+    float range = max(max(lN, lS), max(max(lE, lW), lM)) - min(min(lN, lS), min(min(lE, lW), lM));
+    vec3 c = cM;
+    if (range > 0.06) {
+      vec2 dir = vec2(-((lN + lS) - (lE + lW)), ((lN + lE) - (lS + lW)));
+      dir = dir / (min(abs(dir.x), abs(dir.y)) + 0.05); dir = clamp(dir, -4.0, 4.0) * texel;
+      vec3 a = 0.5 * (grade(hdr(vUv + dir * (-1.0 / 6.0))) + grade(hdr(vUv + dir * (1.0 / 6.0))));
+      c = mix(cM, a, 0.75);
+    }
+    vec2 q = vUv - 0.5; c *= 1.0 - 0.28 * pow(clamp(length(q * vec2(1.0, 1.15)) * 1.25, 0.0, 1.0), 2.4);
+    c = pow(c, vec3(1.0 / 2.2));
+    gl_FragColor = vec4(c, 1.0);
+  }`
+});
+
+// render the far shadow map once
+{
+  const hide = []; scene.traverse(o => { if (o.isMesh && !WORLD.includes(o)) { if (o.visible) hide.push(o); } });
+  for (const o of hide) o.visible = false; sky.visible = false;
+  const dm = new THREE.MeshBasicMaterial({ colorWrite: false }); scene.overrideMaterial = dm;
+  renderer.setRenderTarget(FAR.rt); renderer.clear(); renderer.render(scene, FAR.cam);
+  scene.overrideMaterial = null; for (const o of hide) o.visible = true; sky.visible = true; renderer.setRenderTarget(null);
+  FAR.mat.multiplyMatrices(FAR.cam.projectionMatrix, FAR.cam.matrixWorldInverse);
+}
+renderer.shadowMap.autoUpdate = false; renderer.shadowMap.needsUpdate = true;
+let FRAME = 0;
+
+window.renderView = (v) => {
+  const w = v.w, h = v.h;
+  renderer.setSize(w, h, false); ensureRTs(w, h);
+  camera.aspect = w / h; camera.fov = v.fov; camera.near = v.near || 0.05; camera.far = 40000; camera.updateProjectionMatrix();
+  camera.position.set(...v.pos); camera.up.set(...(v.up || [0, 1, 0])); camera.lookAt(new THREE.Vector3(...v.look)); camera.updateMatrixWorld();
+  U.time.value = v.time || 0;
+  if (v.hero) window.poseHero(v.hero);
+  updateBlood(v);
+  updatePetals(v.time || 0, v.petalsAt || v.pos, v.pos); updateBirds(v.time || 0); updateFireflies(v.time || 0);
+  if (HEADMESH) HEADMESH.visible = !v.fp;
+  H.root.visible = v.hero ? true : false;
+  eyeFill.visible = !!v.fp; if (v.fp) eyeFill.position.set(v.pos[0], v.pos[1] + 0.25, v.pos[2]);
+  if (v.shadows) renderer.shadowMap.needsUpdate = true;
+  // 0. the lake's mirror: the scene from below the water plane, clipped at the plane (Lengyel oblique near plane)
+  if (!REFL.rt || REFL.rt.width !== Math.ceil(w / 2)) { if (REFL.rt) REFL.rt.dispose(); REFL.rt = new THREE.WebGLRenderTarget(Math.ceil(w / 2), Math.ceil(h / 2), { type: THREE.HalfFloatType }); }
+  {
+    const n = new THREE.Vector3(0, 1, 0), rp = new THREE.Vector3(camera.position.x, WATER_Y, camera.position.z);
+    const view = new THREE.Vector3().subVectors(rp, camera.position).reflect(n).negate().add(rp);
+    const rot = new THREE.Matrix4().extractRotation(camera.matrixWorld);
+    const look = new THREE.Vector3(0, 0, -1).applyMatrix4(rot).add(camera.position);
+    const tgt = new THREE.Vector3().subVectors(rp, look).reflect(n).negate().add(rp);
+    const vc = REFL.cam; vc.position.copy(view); vc.up.set(0, 1, 0).applyMatrix4(rot).reflect(n); vc.lookAt(tgt);
+    vc.far = camera.far; vc.updateMatrixWorld(); vc.projectionMatrix.copy(camera.projectionMatrix);
+    REFL.texMat.set(0.5, 0, 0, 0.5, 0, 0.5, 0, 0.5, 0, 0, 0.5, 0.5, 0, 0, 0, 1).multiply(vc.projectionMatrix).multiply(vc.matrixWorldInverse);
+    const pl = new THREE.Plane().setFromNormalAndCoplanarPoint(n, rp).applyMatrix4(vc.matrixWorldInverse);
+    const cp = new THREE.Vector4(pl.normal.x, pl.normal.y, pl.normal.z, pl.constant), pm = vc.projectionMatrix, e = pm.elements;
+    const q = new THREE.Vector4((Math.sign(cp.x) + e[8]) / e[0], (Math.sign(cp.y) + e[9]) / e[5], -1.0, (1.0 + e[10]) / e[14]);
+    cp.multiplyScalar(2.0 / cp.dot(q)); e[2] = cp.x; e[6] = cp.y; e[10] = cp.z + 1.0 - 0.003; e[14] = cp.w;
+    for (const m of WATER) m.visible = false; H.root.visible = false; petals.visible = false; fireflies.visible = false;
+    renderer.setRenderTarget(REFL.rt); renderer.render(scene, vc);
+    for (const m of WATER) m.visible = true; H.root.visible = !!v.hero; petals.visible = true; fireflies.visible = true;
+    waterMat.uniforms.tRefl.value = REFL.rt.texture;
+  }
+  // 1. scene (HDR)
+  renderer.setRenderTarget(RT.scene); renderer.render(scene, camera);
+  // 2. volumetrics at half resolution
+  CAMU.tDepth.value = RT.scene.depthTexture; CAMU.invProj.value.copy(camera.projectionMatrixInverse); CAMU.camWorld.value.copy(camera.matrixWorld);
+  CAMU.camPos.value.copy(camera.position); CAMU.near.value = camera.near; CAMU.far.value = camera.far;
+  volMat.uniforms.frame.value = (FRAME++) % 64; volMat.uniforms.res.value.set(RT.vol.width, RT.vol.height);
+  pass(volMat, RT.vol);
+  // 3. composite
+  compMat.uniforms.tScene.value = RT.scene.texture; compMat.uniforms.tVol.value = RT.vol.texture; compMat.uniforms.volRes.value.set(RT.vol.width, RT.vol.height);
+  pass(compMat, RT.comp);
+  // 4. crepuscular rays toward the sun
+  const sp = camera.position.clone().addScaledVector(SUN_DIR, 10000).project(camera);
+  const facing = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion).dot(SUN_DIR);
+  godMat.uniforms.tComp.value = RT.comp.texture; godMat.uniforms.sunUv.value.set(sp.x * 0.5 + 0.5, sp.y * 0.5 + 0.5);
+  godMat.uniforms.strength.value = (v.god === undefined ? 1.0 : v.god) * THREE.MathUtils.smoothstep(facing, 0.35, 0.85) * (sp.z < 1 ? 1 : 0);
+  pass(godMat, RT.god);
+  // 5. bloom
+  let src = RT.comp;
+  for (let i = 0; i < RT.blm.length; i++) { downMat.uniforms.tSrc.value = src.texture; downMat.uniforms.texel.value.set(1 / src.width, 1 / src.height);
+    downMat.uniforms.first.value = i === 0 ? 1 : 0; pass(downMat, RT.blm[i]); src = RT.blm[i]; }
+  let low = RT.blm[RT.blm.length - 1];
+  for (let i = RT.blm.length - 2; i >= 0; i--) { upMat.uniforms.tLow.value = low.texture; upMat.uniforms.tHigh.value = RT.blm[i].texture;
+    upMat.uniforms.texel.value.set(1 / low.width, 1 / low.height); pass(upMat, RT.blmU[i]); low = RT.blmU[i]; }
+  // 6. tonemap, grade, out
+  finalMat.uniforms.tComp.value = RT.comp.texture; finalMat.uniforms.tBloom.value = low.texture; finalMat.uniforms.tGod.value = RT.god.texture;
+  finalMat.uniforms.exposure.value = v.exposure || 1.1; finalMat.uniforms.texel.value.set(1 / w, 1 / h);
+  pass(finalMat, null);
+  return renderer.domElement.toDataURL('image/png');
+};
+window.READY = true;
+</script></body></html>
