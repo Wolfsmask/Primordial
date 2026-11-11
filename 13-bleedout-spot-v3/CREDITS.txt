@@ -1,0 +1,18 @@
+Visuals: the world (cloud sea, stone pillars, floating islands, the floating mountain, the arch, the ringed planet), all
+textures, the character animation and the renderer were made for this video.
+
+Shader look: the renderer is a small shader-pack pipeline written for this video (HDR, physically based sky, volumetric
+clouds with multiple-scattering octaves and the "powder" term, aerial perspective with sun shafts, crepuscular rays,
+bloom, Lottes filmic tonemap). Several of these techniques and constants are adapted from Photon Shaders by SixthSurge
+(https://github.com/sixthsurge/photon), whose license allows use for published videos. Photon itself only runs inside
+Minecraft Java; nothing here runs Minecraft.
+
+Music: "Feel Good Inc." (Gorillaz), 0:59.85 to 1:15.95. The song file was supplied by the channel. It is a commercial
+recording and is not licensed by this project: on YouTube, adding it from the Shorts audio library (or accepting a
+Content ID claim) is the usual way to use it.
+
+Sound effects:
+- Footsteps and bark touch: "Different steps on wood, stone, leaves, gravel and mud" by TinyWorlds, CC0
+  https://opengameart.org/content/different-steps-on-wood-stone-leaves-gravel-and-mud
+- Body hitting the ground: "75 CC0 breaking / falling / hit sfx", CC0
+  https://opengameart.org/content/75-cc0-breaking-falling-hit-sfx  (plus a synthesised low thump)
