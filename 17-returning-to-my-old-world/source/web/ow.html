@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>old world</title>
+<style>html,body{margin:0;background:#000;overflow:hidden}</style>
+<script type="importmap">{"imports":{"three":"./node_modules/three/build/three.module.js","three/addons/":"./node_modules/three/examples/jsm/"}}</script>
+</head><body>
+<script type="module">
+// The old world in the classic look: block light baked into the vertices with smooth lighting, flat face shading,
+// linear fog, a square sun, slow blocky clouds.  Entities (door, sign, wolf, the arm, hearts) are posed per frame.
+import * as THREE from 'three';
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.outputColorSpace = THREE.LinearSRGBColorSpace;           // everything stays in the game's gamma-naive space
+renderer.autoClear = false;
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene(), armScene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(70, 9 / 16, 0.05, 1200), armCam = new THREE.PerspectiveCamera(70, 9 / 16, 0.01, 10);
+const meta = await (await fetch('world.json')).json();
+const loadImg = (src) => new Promise(r => { const i = new Image(); i.onload = () => r(i); i.src = src; });
+const pixels = (img) => { const c = document.createElement('canvas'); c.width = img.width; c.height = img.height; const g = c.getContext('2d');
+  g.drawImage(img, 0, 0); return g.getImageData(0, 0, img.width, img.height).data; };
+// ---- the block textures as a texture array (one layer per tile, so the mipmaps never bleed between tiles)
+const atlasImg = await loadImg('atlas.png'); const AP = pixels(atlasImg);
+const NT = 48, TS = 16;
+const arr = new Uint8Array(TS * TS * 4 * NT);
+for (let t = 0; t < NT; t++) { const cx = (t % 16) * TS, cy = Math.floor(t / 16) * TS;
+  for (let y = 0; y < TS; y++) for (let x = 0; x < TS; x++) { const s = ((cy + y) * atlasImg.width + cx + x) * 4, d = ((t * TS + (TS - 1 - y)) * TS + x) * 4;
+    arr[d] = AP[s]; arr[d + 1] = AP[s + 1]; arr[d + 2] = AP[s + 2]; arr[d + 3] = AP[s + 3]; } }
+const tex = new THREE.DataArrayTexture(arr, TS, TS, NT);
+tex.magFilter = THREE.NearestFilter; tex.minFilter = THREE.NearestMipmapLinearFilter; tex.generateMipmaps = true; tex.needsUpdate = true;
+const U = { time: { value: 0 }, sunDir: { value: new THREE.Vector3() }, skyTop: { value: new THREE.Color() }, horizon: { value: new THREE.Color() },
+  glowCol: { value: new THREE.Color() }, fogNear: { value: 70 }, fogFar: { value: 125 }, camPos: { value: new THREE.Vector3() } };
+const FOG = `
+uniform vec3 sunDir; uniform vec3 skyTop; uniform vec3 horizon; uniform vec3 glowCol; uniform float fogNear; uniform float fogFar; uniform vec3 camPos;
+vec3 fogColour(vec3 d) {
+  vec2 h = normalize(d.xz + 1e-5); vec2 s = normalize(sunDir.xz);
+  float g = pow(max(dot(h, s), 0.0), 3.0) * (1.0 - smoothstep(0.0, 0.5, abs(d.y)));
+  return mix(horizon, glowCol, g * 0.75);
+}`;
+const terrainMat = (kind) => new THREE.ShaderMaterial({
+  uniforms: { tArr: { value: tex }, ...U },
+  transparent: kind === 'water', depthWrite: kind !== 'water', side: kind === 'opaque' ? THREE.BackSide : THREE.DoubleSide,      // the mesher winds faces clockwise
+  vertexShader: `attribute vec3 aUV; attribute vec3 color; varying vec3 vUV; varying vec3 vCol; varying vec3 vW;
+    void main(){ vUV = aUV; vCol = color; vec4 w = modelMatrix * vec4(position, 1.0); vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }`,
+  fragmentShader: `precision highp sampler2DArray; uniform sampler2DArray tArr; uniform float time; varying vec3 vUV; varying vec3 vCol; varying vec3 vW;` + FOG + `
+    void main(){
+      vec2 uv = vec2(vUV.x, 1.0 - vUV.y);
+      ${kind === 'water' ? 'uv = fract(uv + vec2(0.0, time * 0.18)); uv.x = fract(uv.x + 0.06 * sin(time * 1.3 + vW.z * 0.7));' : ''}
+      vec4 t = texture(tArr, vec3(uv, vUV.z));
+      ${kind === 'cutout' ? 'if (t.a < 0.5) discard;' : ''}
+      vec3 c = t.rgb * vCol;
+      vec3 d = vW - camPos; float dist = length(d);
+      float f = clamp((dist - fogNear) / (fogFar - fogNear), 0.0, 1.0);
+      c = mix(c, fogColour(d / dist), f);
+      gl_FragColor = vec4(c, ${kind === 'water' ? 't.a * 0.92' : '1.0'});
+    }`
+});
+const MAT = { opaque: terrainMat('opaque'), cutout: terrainMat('cutout'), water: terrainMat('water') };
+{
+  const buf = await (await fetch('world.bin')).arrayBuffer();
+  for (const [k, p] of Object.entries(meta.groups)) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(buf, p.pos[0], p.pos[1]), 3));
+    g.setAttribute('aUV', new THREE.BufferAttribute(new Float32Array(buf, p.uv[0], p.uv[1]), 3));
+    g.setAttribute('color', new THREE.BufferAttribute(new Uint8Array(buf, p.col[0], p.col[1]), 3, true));
+    g.setIndex(new THREE.BufferAttribute(new Uint32Array(buf, p.idx[0], p.idx[1]), 1));
+    const m = new THREE.Mesh(g, MAT[k]); m.frustumCulled = false; m.renderOrder = k === 'water' ? 5 : 0; scene.add(m);
+  }
+}
+// ---- sky: the classic gradient, a sunset glow toward the sun, the square sun
+const skyMat = new THREE.ShaderMaterial({ uniforms: { ...U }, side: THREE.BackSide, depthWrite: false,
+  vertexShader: `varying vec3 vD; void main(){ vD = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: FOG + `varying vec3 vD; void main(){ vec3 d = normalize(vD);
+    vec3 c = mix(fogColour(d), skyTop, smoothstep(0.0, 0.45, d.y));
+    if (d.y < 0.0) c = mix(fogColour(d), fogColour(d) * 0.8, smoothstep(0.0, -0.3, d.y));
+    gl_FragColor = vec4(c, 1.0); }` });
+const sky = new THREE.Mesh(new THREE.SphereGeometry(600, 32, 16), skyMat); sky.renderOrder = -10; scene.add(sky);
+const sunTex = new THREE.Texture(await loadImg('sun.png')); sunTex.magFilter = THREE.NearestFilter; sunTex.minFilter = THREE.NearestFilter; sunTex.needsUpdate = true;
+const sun = new THREE.Mesh(new THREE.PlaneGeometry(70, 70), new THREE.MeshBasicMaterial({ map: sunTex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false }));
+sun.renderOrder = -9; scene.add(sun);
+// ---- clouds: 12 x 4 x 12 boxes from a fixed pattern at y 108, drifting east; depth first, then colour on the front faces
+const cloudGroup = new THREE.Group(); scene.add(cloudGroup);
+{
+  const N = 64, S = 12, Y0 = 108, H = 4;
+  const hash = (x, y) => { let h = x * 374761393 + y * 668265263; h = (h ^ (h >>> 13)) * 1274126177; return ((h ^ (h >>> 16)) >>> 0) / 4294967296; };
+  const vn = (x, y) => { const xi = Math.floor(x), yi = Math.floor(y), fx = x - xi, fy = y - yi, sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy);
+    return (hash(xi, yi) * (1 - sx) + hash(xi + 1, yi) * sx) * (1 - sy) + (hash(xi, yi + 1) * (1 - sx) + hash(xi + 1, yi + 1) * sx) * sy; };
+  const on = (i, j) => { i = ((i % N) + N) % N; j = ((j % N) + N) % N; return vn(i * 0.35, j * 0.35) * 0.7 + hash(i, j) * 0.3 > 0.58; };
+  const pos = [], col = [];
+  const face = (a, b, c, d, s) => { pos.push(...a, ...b, ...c, ...a, ...c, ...d); for (let k = 0; k < 6; k++) col.push(s, s, s); };
+  for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) { if (!on(i, j)) continue;
+    const x0 = i * S, x1 = x0 + S, z0 = j * S, z1 = z0 + S, y0 = Y0, y1 = Y0 + H;
+    face([x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0], 1.0);
+    face([x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1], 0.72);
+    if (!on(i + 1, j)) face([x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1], 0.86);
+    if (!on(i - 1, j)) face([x0, y0, z1], [x0, y1, z1], [x0, y1, z0], [x0, y0, z0], 0.86);
+    if (!on(i, j + 1)) face([x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1], 0.92);
+    if (!on(i, j - 1)) face([x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0], 0.92); }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  const cm = (pass) => new THREE.ShaderMaterial({ uniforms: { cloudCol: { value: new THREE.Color(1, 0.94, 0.88) }, ...U },
+    transparent: pass === 1, depthWrite: pass === 0, colorWrite: pass === 1, depthFunc: pass === 1 ? THREE.LessEqualDepth : THREE.LessDepth, side: THREE.DoubleSide,
+    vertexShader: `attribute vec3 color; varying vec3 vC; varying vec3 vW; void main(){ vC = color; vec4 w = modelMatrix * vec4(position, 1.0); vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }`,
+    fragmentShader: FOG + `uniform vec3 cloudCol; varying vec3 vC; varying vec3 vW; void main(){ vec3 d = vW - camPos; float dist = length(d);
+      float f = clamp((dist - 140.0) / 260.0, 0.0, 1.0); vec3 c = mix(cloudCol * vC, fogColour(d / dist), f);
+      gl_FragColor = vec4(c, 0.82 * (1.0 - f * f)); }` });
+  for (let k = 0; k < 2; k++) for (const ox of [-1, 0]) for (const oz of [-1, 0]) {
+    const m = new THREE.Mesh(g, cm(k)); m.position.set(ox * N * S + 128 - N * S / 2 + N * S / 2, 0, oz * N * S + 128); m.renderOrder = 8 + k; m.frustumCulled = false; cloudGroup.add(m); }
+}
+// ---- light at a point (for the entities): classic curve on the baked sky / block levels
+const LV = meta.light;
+const lm = (l) => { const f = 1 - l / 15; return (1 - f) / (f * 3 + 1) * 0.95 + 0.05; };
+function lightAt(p) {
+  const [ox, oy, oz] = LV.origin, [nx, ny, nz] = LV.size;
+  const get = (A, x, y, z) => { x = Math.min(nx - 1, Math.max(0, x)); y = Math.min(ny - 1, Math.max(0, y)); z = Math.min(nz - 1, Math.max(0, z)); return A[(x * ny + y) * nz + z]; };
+  const fx = p.x - ox - 0.5, fy = p.y - oy - 0.5, fz = p.z - oz - 0.5, x0 = Math.floor(fx), y0 = Math.floor(fy), z0 = Math.floor(fz);
+  let s = 0, b = 0;
+  for (let i = 0; i < 2; i++) for (let j = 0; j < 2; j++) for (let k = 0; k < 2; k++) {
+    const w = (i ? fx - x0 : 1 - fx + x0) * (j ? fy - y0 : 1 - fy + y0) * (k ? fz - z0 : 1 - fz + z0);
+    s += w * lm(get(LV.sky, x0 + i, y0 + j, z0 + k)); b += w * lm(get(LV.blk, x0 + i, y0 + j, z0 + k)); }
+  const sc = meta.sky_col, tc = meta.torch_col;
+  return new THREE.Vector3(Math.max(sc[0] * s, tc[0] * b), Math.max(sc[1] * s, tc[1] * b), Math.max(sc[2] * s, tc[2] * b));
+}
+// ---- entity material: a skin texture, classic two-light shading, the light where the entity stands
+const entMat = (map, opts = {}) => new THREE.ShaderMaterial({ uniforms: { map: { value: map }, uLight: { value: new THREE.Vector3(1, 1, 1) }, ...U },
+  transparent: false, side: opts.side || THREE.FrontSide,
+  vertexShader: `varying vec2 vUv; varying vec3 vN; varying vec3 vW; void main(){ vUv = uv; vN = normalize(mat3(modelMatrix) * normal); vec4 w = modelMatrix * vec4(position, 1.0); vW = w.xyz;
+    gl_Position = projectionMatrix * viewMatrix * w; }`,
+  fragmentShader: FOG + `uniform sampler2D map; uniform vec3 uLight; varying vec2 vUv; varying vec3 vN; varying vec3 vW;
+    void main(){ vec4 t = texture2D(map, vUv); if (t.a < 0.5) discard;
+      vec3 l0 = normalize(vec3(0.2, 1.0, -0.7)), l1 = normalize(vec3(-0.2, 1.0, 0.7));
+      float sh = min(1.0, 0.4 + 0.6 * (max(dot(vN, l0), 0.0) + max(dot(vN, l1), 0.0)));
+      vec3 c = t.rgb * sh * uLight; ${opts.noFog ? '' : 'vec3 d = vW - camPos; float dist = length(d); c = mix(c, fogColour(d / dist), clamp((dist - fogNear) / (fogFar - fogNear), 0.0, 1.0));'}
+      gl_FragColor = vec4(c, 1.0); }` });
+// box with Minecraft box-UV on a W x H texture; size in pixels, origin at its centre
+function boxUV(w, h, d, u, v, TW, TH, infl = 0) {
+  const g = new THREE.BoxGeometry(w + infl * 2, h + infl * 2, d + infl * 2);
+  const uv = g.attributes.uv;
+  // BoxGeometry face order: +x, -x, +y, -y, +z, -z ; each 4 verts (uv corners: (0,1),(1,1),(0,0),(1,0))
+  const R = { px: [u, v + d, d, h], nx: [u + d + w, v + d, d, h], py: [u + d, v, w, d], ny: [u + d + w, v, w, d], pz: [u + d, v + d, w, h], nz: [u + 2 * d + w, v + d, w, h] };
+  const order = ['nx', 'px', 'py', 'ny', 'pz', 'nz'];          // +x is the model's left side (its right arm's outer face is -x when facing +z)
+  for (let f = 0; f < 6; f++) { const [x, y, ww, hh] = R[order[f]];
+    for (let k = 0; k < 4; k++) { const cu = uv.getX(f * 4 + k), cv = uv.getY(f * 4 + k);
+      let uu = x + cu * ww, vv = y + (1 - cv) * hh;
+      if (order[f] === 'ny') vv = y + cv * hh;
+      uv.setXY(f * 4 + k, uu / TW, 1 - vv / TH); } }
+  return g;
+}
+const nearestTex = async (src) => { const t = new THREE.Texture(await loadImg(src)); t.magFilter = THREE.NearestFilter; t.minFilter = THREE.NearestFilter; t.generateMipmaps = false; t.needsUpdate = true; return t; };
+// ---- the door (hinge at the west edge of the doorway, swings in)
+const PX = 1 / 16;
+const door = new THREE.Group(); scene.add(door);
+const doorPivot = new THREE.Group(); door.add(doorPivot);
+{
+  const D = meta.door; door.position.set(D.x, D.y, D.z);
+  const mk = (layer, y0) => { const g = new THREE.BoxGeometry(1, 1, 3 * PX); g.translate(0.5, y0 + 0.5, 1.5 * PX);
+    const n = g.attributes.position.count, a = new Float32Array(n * 3), uvA = g.attributes.uv;
+    for (let i = 0; i < n; i++) { a[i * 3] = uvA.getX(i); a[i * 3 + 1] = 1 - uvA.getY(i); a[i * 3 + 2] = layer; }
+    g.setAttribute('aUV', new THREE.BufferAttribute(a, 3)); g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(n * 3).fill(1), 3)); return g; };
+  doorPivot.add(new THREE.Mesh(mk(34, 0), MAT.cutout)); doorPivot.add(new THREE.Mesh(mk(33, 1), MAT.cutout));
+}
+// ---- the sign by the path
+const signTex = await nearestTex('sign.png');
+{
+  const S = meta.sign, grp = new THREE.Group(); grp.position.set(S.x + 0.5, S.y, S.z + 0.5); scene.add(grp);
+  const L = lightAt(new THREE.Vector3(S.x + 0.5, S.y + 1.2, S.z + 0.5));
+  const plankMat = entMat(signTex); plankMat.uniforms.uLight.value.copy(L);
+  const post = new THREE.Mesh(new THREE.BoxGeometry(2 * PX, 14 * PX, 2 * PX), plankMat); post.position.y = 7 * PX; grp.add(post);
+  const board = new THREE.Mesh(new THREE.BoxGeometry(24 * PX, 12 * PX, 2 * PX), plankMat); board.position.y = 20 * PX; grp.add(board);
+  // the board's uv: whole sign texture on both big faces
+  const uv = board.geometry.attributes.uv;
+  for (let i = 0; i < uv.count; i++) { const f = Math.floor(i / 4); if (f < 4) uv.setXY(i, uv.getX(i) * 0.12, uv.getY(i) * 0.25); }
+}
+// ---- the wolf: box model with a hierarchy so it can sit, stand, walk, wag, tilt its head
+const wolfTex = await nearestTex('wolf.png');
+const wolfMat = entMat(wolfTex);
+const wolf = new THREE.Group(); scene.add(wolf);
+const W = {};
+{
+  const part = (w, h, d, u, v) => new THREE.Mesh(boxUV(w, h, d, u, v, 64, 32), wolfMat);
+  const s = PX;
+  W.torso = new THREE.Group(); wolf.add(W.torso);                 // pivot at the hips
+  const body = part(6, 9, 6, 18, 14); body.rotation.x = Math.PI / 2; body.position.set(0, 3 * s, 4.5 * s); body.scale.setScalar(s);
+  W.torso.add(body);
+  const mane = part(8, 6, 7, 21, 0); mane.position.set(0, 3.5 * s, 8.5 * s); mane.scale.setScalar(s); W.torso.add(mane);
+  W.tailP = new THREE.Group(); W.tailP.position.set(0, 5 * s, 0); W.torso.add(W.tailP);
+  const tail = part(2, 8, 2, 9, 18); tail.position.set(0, -4 * s, 0); tail.scale.setScalar(s); W.tailP.add(tail);
+  W.head = new THREE.Group(); wolf.add(W.head);
+  const head = part(6, 6, 4, 0, 0); head.position.set(0, 0, 2 * s); head.scale.setScalar(s); W.head.add(head);
+  const snout = part(3, 3, 4, 0, 10); snout.position.set(0, -1.5 * s, 6 * s); snout.scale.setScalar(s); W.head.add(snout);
+  W.ears = [];
+  for (const sx of [-2, 2]) { const ep = new THREE.Group(); ep.position.set(sx * s, 3 * s, 1 * s); W.head.add(ep);
+    const ear = part(2, 2, 1, 16, 14); ear.position.set(0, 1 * s, 0); ear.scale.setScalar(s); ep.add(ear); W.ears.push(ep); }
+  W.legs = [];
+  for (const [lx, lz, front] of [[-1.5, 7.5, 1], [1.5, 7.5, 1], [-1.5, 1.5, 0], [1.5, 1.5, 0]]) { const lp = new THREE.Group(); wolf.add(lp);
+    const leg = part(2, 8, 2, 0, 18); leg.position.set(0, -4 * s, 0); leg.scale.setScalar(s); lp.add(leg); W.legs.push({ g: lp, lx, lz, front }); }
+}
+const tmpV = new THREE.Vector3();
+function poseWolf(p) {
+  // p: x, y, z, yaw (deg, 0 = facing +z), sit 0..1, walk phase, walkAmt, headYaw, headPitch, headRoll (deg), wag (rad amplitude), tailUp 0..1, ears 0..1
+  const s = PX, sit = p.sit;
+  wolf.position.set(p.x, p.y, p.z); wolf.rotation.y = THREE.MathUtils.degToRad(p.yaw);
+  // hips: standing at 8 px over the floor; sitting they drop to 3 px and the body tilts up so the chest stands on the front legs
+  const hipY = (8 - 4.2 * sit + Math.sin(p.phase * 2) * 0.35 * p.walkAmt) * s, tilt = -0.48 * sit;
+  W.torso.position.set(0, hipY, -4 * s); W.torso.rotation.x = tilt;
+  // tail: hangs and swings; up and fast when happy; lies on the floor when sitting
+  W.tailP.rotation.x = 0.4 + 1.4 * p.tailUp + sit * 0.8 * (1 - p.tailUp * 0.6);
+  W.tailP.rotation.z = Math.sin(p.wagPhase) * p.wag;
+  // neck point, carried by the torso
+  W.torso.updateMatrix(); tmpV.set(0, 6 * s, 10 * s).applyMatrix4(W.torso.matrix);
+  W.head.position.copy(tmpV);
+  W.head.rotation.set(THREE.MathUtils.degToRad(p.headPitch), THREE.MathUtils.degToRad(p.headYaw), THREE.MathUtils.degToRad(p.headRoll), 'YXZ');
+  W.ears.forEach((e, i) => { e.rotation.x = -0.25 * (1 - p.ears) ; e.rotation.z = (i ? -1 : 1) * 0.12 * (1 - p.ears); });
+  // legs: front legs hang from the chest (always upright), hind legs fold flat forward when sitting
+  for (const L of W.legs) {
+    if (L.front) { tmpV.set(L.lx * s, 0, L.lz * s).applyMatrix4(W.torso.matrix); L.g.position.set(L.lx * s, tmpV.y, tmpV.z);
+      const ph = p.phase + (L.lx > 0 ? Math.PI : 0); L.g.rotation.x = Math.sin(ph) * 0.55 * p.walkAmt;
+      L.g.scale.y = Math.max(0.6, Math.min(1, tmpV.y / (8 * s))); }
+    else { const ph = p.phase + (L.lx > 0 ? 0 : Math.PI);
+      L.g.position.set(L.lx * s, (8 - 6 * sit) * s, (L.lz - 4) * s + sit * 1.5 * s);
+      L.g.rotation.x = Math.sin(ph) * 0.55 * p.walkAmt * (1 - sit) - sit * 1.45; L.g.scale.y = 1; }
+  }
+  wolfMat.uniforms.uLight.value.copy(lightAt(new THREE.Vector3(p.x, p.y + 0.6, p.z)));
+}
+// ---- hearts
+const heartTex = (() => { const c = document.createElement('canvas'); c.width = c.height = 9; const g = c.getContext('2d');
+  const rows = ['.##...##.', '#xx#.#xx#', '#xrr#rrr#', '#rrrrrrr#', '.#rrrrr#.', '..#rrr#..', '...#r#...', '....#....', '.........'];
+  rows.forEach((r, y) => [...r].forEach((ch, x) => { if (ch === '.') return; g.fillStyle = ch === '#' ? '#3a0606' : ch === 'x' ? '#ff9a9a' : '#e01818'; g.fillRect(x, y, 1, 1); }));
+  const t = new THREE.CanvasTexture(c); t.magFilter = THREE.NearestFilter; t.minFilter = THREE.NearestFilter; return t; })();
+const hearts = []; for (let i = 0; i < 8; i++) { const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: heartTex, transparent: true, depthWrite: false })); sp.visible = false; scene.add(sp); hearts.push(sp); }
+// ---- the first-person arm (the player's own skin), drawn over the world with its own camera
+const skinTex = await nearestTex('skin.png');
+const armMat = entMat(skinTex, { noFog: true }), armMat2 = entMat(skinTex, { noFog: true, side: THREE.DoubleSide });
+const arm = new THREE.Group(); armScene.add(arm);
+{
+  const inner = new THREE.Mesh(boxUV(3, 12, 4, 40, 16, 64, 64), armMat); const outer = new THREE.Mesh(boxUV(3, 12, 4, 40, 32, 64, 64, 0.25), armMat2);
+  for (const m of [inner, outer]) { m.position.set(0, -4, 0); arm.add(m); }
+  arm.scale.setScalar(0.0625);
+}
+window.READY = true;
+// ------------------------------------------------------------------ one frame
+const SUN_COL = new THREE.Color();
+window.renderView = (v) => {
+  const W_ = v.w || 540, H_ = v.h || 960;
+  renderer.setPixelRatio(1); renderer.setSize(W_, H_, false);
+  U.time.value = v.time || 0;
+  // sun low in the west-south-west; a warm late-afternoon sky
+  const se = THREE.MathUtils.degToRad(v.sunElev ?? 14), sa = THREE.MathUtils.degToRad(v.sunAz ?? 62);   // az: 0 = +z (south), 90 = -x (west)
+  U.sunDir.value.set(-Math.sin(sa) * Math.cos(se), Math.sin(se), Math.cos(sa) * Math.cos(se));
+  U.skyTop.value.setRGB(0.47, 0.63, 0.98); U.horizon.value.setRGB(0.78, 0.86, 0.98); U.glowCol.value.setRGB(1.0, 0.72, 0.46);
+  U.fogNear.value = v.fogNear ?? 70; U.fogFar.value = v.fogFar ?? 125;
+  camera.fov = v.fov || 70; camera.aspect = W_ / H_; camera.updateProjectionMatrix();
+  armCam.fov = 70; armCam.aspect = W_ / H_; armCam.updateProjectionMatrix();
+  camera.position.set(...v.pos);
+  const yaw = THREE.MathUtils.degToRad(v.yaw), pitch = THREE.MathUtils.degToRad(v.pitch), roll = THREE.MathUtils.degToRad(v.roll || 0);
+  camera.rotation.set(0, 0, 0); camera.rotation.order = 'YXZ';
+  camera.rotation.y = Math.PI - yaw; camera.rotation.x = -pitch; camera.rotation.z = roll;      // yaw 0 looks along +z
+  camera.updateMatrixWorld(); U.camPos.value.copy(camera.position);
+  sky.position.copy(camera.position);
+  sun.position.copy(camera.position).addScaledVector(U.sunDir.value, 500); sun.lookAt(camera.position);
+  cloudGroup.position.set((v.time || 0) * 1.1 - 380, 0, -380);
+  // door
+  doorPivot.rotation.y = -Math.PI / 2 * (v.door || 0);
+  const dl = lightAt(new THREE.Vector3(meta.door.x + 0.5, meta.door.y + 1, meta.door.z + 0.5));
+  const dc = door.children[0].children; for (const m of dc) { const c = m.geometry.attributes.color; for (let i = 0; i < c.count; i++) c.setXYZ(i, dl.x * 0.85, dl.y * 0.85, dl.z * 0.85); c.needsUpdate = true; }
+  // wolf
+  if (v.wolf) { wolf.visible = true; poseWolf(v.wolf); } else wolf.visible = false;
+  hearts.forEach((h, i) => { const q = (v.hearts || [])[i]; h.visible = !!q; if (q) { h.position.set(q[0], q[1], q[2]); h.scale.setScalar(q[3] || 0.3); } });
+  renderer.setClearColor(0x000000, 1); renderer.clear();
+  renderer.render(scene, camera);
+  if (v.arm) {
+    const a = v.arm;
+    const P = window.ARMP || { x: 0.3, y: -0.64, z: -0.5, rx: 100, ry: 20, rz: 8 };
+    arm.position.set(P.x + (a.bx || 0), P.y + (a.by || 0) - (a.drop || 0), P.z + (a.bz || 0));
+    arm.rotation.set(THREE.MathUtils.degToRad(P.rx + (a.swing || 0) * 32), THREE.MathUtils.degToRad(P.ry + (a.swing || 0) * 10), THREE.MathUtils.degToRad(P.rz - (a.swing || 0) * 6), 'YXZ');
+    const L = lightAt(new THREE.Vector3(...v.pos)); armMat.uniforms.uLight.value.copy(L); armMat2.uniforms.uLight.value.copy(L);
+    renderer.clearDepth(); renderer.render(armScene, armCam);
+  }
+  return renderer.domElement.toDataURL('image/png');
+};
+</script></body></html>

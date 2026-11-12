@@ -1,0 +1,16 @@
+Visuals: everything was made for this video. The world, the house, the wolf, the textures (original 16 px pixel art,
+drawn procedurally in an older blocky-game style), the menu screens and their pixel font, and the renderer (classic
+block light and sky light flood-filled and baked with smooth lighting, flat face shading, linear fog, square sun,
+blocky clouds), rendered at 60 fps with eased spline camera motion.
+The player arm uses the channel's own character skin.
+
+Music: original piano piece composed and synthesised for this video (no samples).
+
+Sound effects:
+- Footsteps: "Different steps on wood, stone, leaves, gravel and mud" by TinyWorlds, CC0
+  https://opengameart.org/content/different-steps-on-wood-stone-leaves-gravel-and-mud
+- The menu click, the door hinge and the dog's whimpers and panting are synthesised.
+
+Captions: Inter (SIL Open Font License).
+
+This is a fan-made animation in a blocky-game style; it is not affiliated with Mojang or Microsoft.
