@@ -1,0 +1,17 @@
+Visuals: everything was made for this video. The world (old-generation terrain with cliffs, overhangs, caves, a
+waterfall and floating islands), the house, the wolf, the textures (original 16 px pixel art drawn procedurally to feel
+like the classic beta-era look), the menu screens and their pixel font, and the renderer (classic block light and sky
+light flood-filled and baked with smooth lighting, flat face shading, a sunset sky and fog, blocky clouds, depth of
+field), rendered at 60 fps with smooth spline camera moves, then graded (soft bloom, warmth, grain, vignette).
+The player model uses the channel's own character skin.
+
+Typography: Cinzel by the Cinzel Project Authors (Natanael Gama), SIL Open Font License 1.1 (see source/fonts).
+
+Music: original piano piece composed and synthesised for this video (no samples).
+
+Sound effects:
+- Footsteps and wood sounds: "Different steps on wood, stone, leaves, gravel and mud" by TinyWorlds, CC0
+  https://opengameart.org/content/different-steps-on-wood-stone-leaves-gravel-and-mud
+- The menu click, the door hinge, the dog's whimpers and panting, the crickets and the low hits are synthesised.
+
+This is a fan-made animation in a blocky-game style; it is not affiliated with Mojang or Microsoft.

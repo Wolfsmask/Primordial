@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>old world v2</title>
+<style>html,body{margin:0;background:#000;overflow:hidden}</style>
+<script type="importmap">{"imports":{"three":"./node_modules/three/build/three.module.js","three/addons/":"./node_modules/three/examples/jsm/"}}</script>
+</head><body>
+<script type="module">
+// v2: the classic look at sunset.  Block light baked with smooth lighting, flat face shading, linear fog tinted by
+// the sunset fan, the square sun, blocky clouds lit pink-gold from the west.  No hand (the cinematic camera), a
+// third-person player in the channel's skin, the wolf on the classic model (sit, stand, trot, tail, head tilt), and an
+// optional depth-of-field pass for the close shots.
+import * as THREE from 'three';
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
+renderer.autoClear = false;
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(70, 9 / 16, 0.05, 1400);
+const meta = await (await fetch('world2.json')).json();
+const loadImg = (src) => new Promise(r => { const i = new Image(); i.onload = () => r(i); i.src = src; });
+const pixels = (img) => { const c = document.createElement('canvas'); c.width = img.width; c.height = img.height; const g = c.getContext('2d');
+  g.drawImage(img, 0, 0); return g.getImageData(0, 0, img.width, img.height).data; };
+const atlasImg = await loadImg('atlas2.png'); const AP = pixels(atlasImg);
+const NT = 48, TS = 16, FLOW = 36;
+const arr = new Uint8Array(TS * TS * 4 * NT);
+for (let t = 0; t < NT; t++) { const cx = (t % 16) * TS, cy = Math.floor(t / 16) * TS;
+  for (let y = 0; y < TS; y++) for (let x = 0; x < TS; x++) { const s = ((cy + y) * atlasImg.width + cx + x) * 4, d = ((t * TS + (TS - 1 - y)) * TS + x) * 4;
+    arr[d] = AP[s]; arr[d + 1] = AP[s + 1]; arr[d + 2] = AP[s + 2]; arr[d + 3] = AP[s + 3]; } }
+const tex = new THREE.DataArrayTexture(arr, TS, TS, NT);
+tex.magFilter = THREE.NearestFilter; tex.minFilter = THREE.NearestMipmapLinearFilter; tex.generateMipmaps = true; tex.needsUpdate = true;
+const U = { time: { value: 0 }, sunDir: { value: new THREE.Vector3() }, skyTop: { value: new THREE.Color() }, horizon: { value: new THREE.Color() },
+  glowCol: { value: new THREE.Color() }, fogNear: { value: 90 }, fogFar: { value: 190 }, camPos: { value: new THREE.Vector3() }, dusk: { value: 0 },
+  skyCol: { value: new THREE.Vector3(...meta.sky_col) }, torchCol: { value: new THREE.Vector3(...meta.torch_col) }, daylight: { value: 1 } };
+const FOG = `
+uniform vec3 sunDir; uniform vec3 skyTop; uniform vec3 horizon; uniform vec3 glowCol; uniform float fogNear; uniform float fogFar; uniform vec3 camPos; uniform float dusk;
+uniform vec3 skyCol; uniform vec3 torchCol; uniform float daylight;
+vec3 lightOf(vec2 sb) { return max(skyCol * daylight * sb.x, torchCol * sb.y); }
+vec3 fogColour(vec3 d) {
+  vec2 h = normalize(d.xz + 1e-5); vec2 s = normalize(sunDir.xz);
+  float a = max(dot(h, s), 0.0);
+  float g = (pow(a, 2.0) * 0.55 + pow(a, 12.0) * 0.45) * (1.0 - smoothstep(-0.05, 0.45, d.y));
+  return mix(horizon, glowCol, g);
+}`;
+const terrainMat = (kind) => new THREE.ShaderMaterial({
+  uniforms: { tArr: { value: tex }, ...U },
+  transparent: kind === 'water', depthWrite: kind !== 'water', side: kind === 'opaque' ? THREE.BackSide : THREE.DoubleSide,
+  vertexShader: `attribute vec3 aUV; attribute vec3 color; varying vec3 vUV; varying vec3 vCol; varying vec3 vW;
+    void main(){ vUV = aUV; vCol = color; vec4 w = modelMatrix * vec4(position, 1.0); vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }`,
+  fragmentShader: `precision highp sampler2DArray; uniform sampler2DArray tArr; uniform float time; varying vec3 vUV; varying vec3 vCol; varying vec3 vW;` + FOG + `
+    void main(){
+      vec2 uv = vec2(vUV.x, 1.0 - vUV.y);
+      ${kind === 'water' ? `bool flow = abs(vUV.z - ${FLOW}.0) < 0.5;
+        if (flow) uv = fract(uv + vec2(0.0, time * 1.6)); else { uv = fract(uv + vec2(time * 0.05, time * 0.12)); uv.x = fract(uv.x + 0.05 * sin(time * 1.1 + vW.z * 0.6)); }` : ''}
+      vec4 t = texture(tArr, vec3(uv, vUV.z));
+      ${kind === 'cutout' ? 'if (t.a < 0.5) discard;' : ''}
+      vec3 c = t.rgb * lightOf(vCol.xy);
+      ${kind === 'water' ? `vec3 vd = normalize(vW - camPos); float fres = pow(1.0 - abs(vd.y), 4.0);
+        if (!flow) c = mix(c, fogColour(reflect(vd, vec3(0.0, 1.0, 0.0))) * 0.9, 0.22 + 0.5 * fres);` : ''}
+      vec3 d = vW - camPos; float dist = length(d);
+      float f = clamp((dist - fogNear) / (fogFar - fogNear), 0.0, 1.0);
+      c = mix(c, fogColour(d / dist), f);
+      gl_FragColor = vec4(c, ${kind === 'water' ? 'clamp(t.a * 0.95 + 0.1, 0.0, 1.0)' : '1.0'});
+    }`
+});
+const MAT = { opaque: terrainMat('opaque'), cutout: terrainMat('cutout'), water: terrainMat('water') };
+{
+  const buf = await (await fetch('world2.bin')).arrayBuffer();
+  for (const [k, p] of Object.entries(meta.groups)) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(buf, p.pos[0], p.pos[1]), 3));
+    g.setAttribute('aUV', new THREE.BufferAttribute(new Float32Array(buf, p.uv[0], p.uv[1]), 3));
+    g.setAttribute('color', new THREE.BufferAttribute(new Uint8Array(buf, p.col[0], p.col[1]), 3, true));
+    g.setIndex(new THREE.BufferAttribute(new Uint32Array(buf, p.idx[0], p.idx[1]), 1));
+    const m = new THREE.Mesh(g, MAT[k]); m.frustumCulled = false; m.renderOrder = k === 'water' ? 5 : 0; scene.add(m);
+  }
+}
+// ---- the sunset sky: deep blue overhead, warm at the horizon, a bright fan round the sun; stars as it darkens
+const skyMat = new THREE.ShaderMaterial({ uniforms: { ...U }, side: THREE.BackSide, depthWrite: false,
+  vertexShader: `varying vec3 vD; void main(){ vD = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: FOG + `varying vec3 vD;
+    float h21(vec2 p){ p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
+    void main(){ vec3 d = normalize(vD);
+    vec3 c = mix(fogColour(d), skyTop, smoothstep(-0.02, 0.5, d.y));
+    // the sunset fan: a soft vertical band of colour rising over the sun
+    vec2 h = normalize(d.xz + 1e-5); vec2 s = normalize(sunDir.xz); float a = max(dot(h, s), 0.0);
+    c += glowCol * 0.35 * pow(a, 6.0) * smoothstep(0.55, 0.0, d.y) * smoothstep(-0.1, 0.05, d.y);
+    if (d.y < 0.0) c = mix(c, fogColour(d) * 0.75, smoothstep(0.0, -0.25, d.y));
+    // a few stars once it gets late
+    vec2 sp = vec2(atan(d.z, d.x) * 120.0, d.y * 240.0); vec2 cell = floor(sp);
+    float st = step(0.9965, h21(cell)) * smoothstep(0.15, 0.5, d.y) * dusk;
+    c += vec3(st) * 0.9;
+    gl_FragColor = vec4(c, 1.0); }` });
+const sky = new THREE.Mesh(new THREE.SphereGeometry(700, 48, 24), skyMat); sky.renderOrder = -10; scene.add(sky);
+const nearestTex = async (src) => { const t = new THREE.Texture(await loadImg(src)); t.magFilter = THREE.NearestFilter; t.minFilter = THREE.NearestFilter; t.generateMipmaps = false; t.needsUpdate = true; return t; };
+const sunTex = await nearestTex('sun2.png');
+const sun = new THREE.Mesh(new THREE.PlaneGeometry(80, 80), new THREE.MeshBasicMaterial({ map: sunTex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, color: 0xffe6c8 }));
+sun.renderOrder = -9; scene.add(sun);
+// ---- clouds, as before, but lit by the sunset
+const cloudGroup = new THREE.Group(); scene.add(cloudGroup);
+const CLOUD = { col: new THREE.Color(1, 0.84, 0.74) };
+{
+  const N = 64, S = 12, Y0 = 108, H = 4;
+  const hash = (x, y) => { let h = x * 374761393 + y * 668265263; h = (h ^ (h >>> 13)) * 1274126177; return ((h ^ (h >>> 16)) >>> 0) / 4294967296; };
+  const vn = (x, y) => { const xi = Math.floor(x), yi = Math.floor(y), fx = x - xi, fy = y - yi, sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy);
+    return (hash(xi, yi) * (1 - sx) + hash(xi + 1, yi) * sx) * (1 - sy) + (hash(xi, yi + 1) * (1 - sx) + hash(xi + 1, yi + 1) * sx) * sy; };
+  const on = (i, j) => { i = ((i % N) + N) % N; j = ((j % N) + N) % N; return vn(i * 0.35, j * 0.35) * 0.7 + hash(i, j) * 0.3 > 0.6; };
+  const pos = [], col = [];
+  const face = (a, b, c, d, s) => { pos.push(...a, ...b, ...c, ...a, ...c, ...d); for (let k = 0; k < 6; k++) col.push(...s); };
+  for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) { if (!on(i, j)) continue;
+    const x0 = i * S, x1 = x0 + S, z0 = j * S, z1 = z0 + S, y0 = Y0, y1 = Y0 + H;
+    face([x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [1.0, 0.0, 0]);
+    face([x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1], [0.62, 0.0, 0]);
+    if (!on(i + 1, j)) face([x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1], [0.82, -1.0, 0]);
+    if (!on(i - 1, j)) face([x0, y0, z1], [x0, y1, z1], [x0, y1, z0], [x0, y0, z0], [0.82, 1.0, 0]);
+    if (!on(i, j + 1)) face([x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1], [0.9, 0.0, 0]);
+    if (!on(i, j - 1)) face([x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [0.9, 0.0, 0]); }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  const cm = (pass) => new THREE.ShaderMaterial({ uniforms: { cloudCol: { value: CLOUD.col }, ...U },
+    transparent: pass === 1, depthWrite: pass === 0, colorWrite: pass === 1, depthFunc: pass === 1 ? THREE.LessEqualDepth : THREE.LessDepth, side: THREE.DoubleSide,
+    vertexShader: `attribute vec3 color; varying vec3 vC; varying vec3 vW; void main(){ vC = color; vec4 w = modelMatrix * vec4(position, 1.0); vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }`,
+    fragmentShader: FOG + `uniform vec3 cloudCol; varying vec3 vC; varying vec3 vW; void main(){ vec3 d = vW - camPos; float dist = length(d);
+      // faces toward the sun (west, -x) catch the light
+      float sunny = vC.y < 0.0 ? 1.0 : 0.0;
+      vec3 base = cloudCol * vC.x + glowCol * 0.25 * sunny;
+      float f = clamp((dist - 160.0) / 320.0, 0.0, 1.0); vec3 c = mix(base, fogColour(d / dist), f);
+      gl_FragColor = vec4(c, 0.85 * (1.0 - f * f)); }` });
+  for (let k = 0; k < 2; k++) for (const ox of [-1, 0, 1]) for (const oz of [-1, 0]) {
+    const m = new THREE.Mesh(g, cm(k)); m.position.set(ox * N * S, 0, oz * N * S + 400); m.renderOrder = 8 + k; m.frustumCulled = false; cloudGroup.add(m); }
+}
+// ---- light at a point, for the entities
+const LV = meta.light;
+const lm = (l) => { const f = 1 - l / 15; const b = (1 - f) / (f * 3 + 1) * 0.95 + 0.05; return b * 0.5 + (1 - Math.pow(1 - b, 4)) * 0.5; };
+function lightAt(p) {
+  const [ox, oy, oz] = LV.origin, [nx, ny, nz] = LV.size;
+  const get = (A, x, y, z) => { x = Math.min(nx - 1, Math.max(0, x)); y = Math.min(ny - 1, Math.max(0, y)); z = Math.min(nz - 1, Math.max(0, z)); return A[(x * ny + y) * nz + z]; };
+  const fx = p.x - ox - 0.5, fy = p.y - oy - 0.5, fz = p.z - oz - 0.5, x0 = Math.floor(fx), y0 = Math.floor(fy), z0 = Math.floor(fz);
+  let s = 0, b = 0;
+  for (let i = 0; i < 2; i++) for (let j = 0; j < 2; j++) for (let k = 0; k < 2; k++) {
+    const w = (i ? fx - x0 : 1 - fx + x0) * (j ? fy - y0 : 1 - fy + y0) * (k ? fz - z0 : 1 - fz + z0);
+    s += w * lm(get(LV.sky, x0 + i, y0 + j, z0 + k)); b += w * lm(get(LV.blk, x0 + i, y0 + j, z0 + k)); }
+  const sc = meta.sky_col, tc = meta.torch_col, dl = U.daylight.value;
+  return new THREE.Vector3(Math.max(sc[0] * s * dl, tc[0] * b), Math.max(sc[1] * s * dl, tc[1] * b), Math.max(sc[2] * s * dl, tc[2] * b));
+}
+// entity material: skin texture, the classic two-light shading, the light where it stands
+const entMat = (map, opts = {}) => new THREE.ShaderMaterial({ uniforms: { map: { value: map }, uLight: { value: new THREE.Vector3(1, 1, 1) }, ...U },
+  side: opts.side || THREE.FrontSide, transparent: false,
+  vertexShader: `varying vec2 vUv; varying vec3 vN; varying vec3 vW; void main(){ vUv = uv; vN = normalize(mat3(modelMatrix) * normal); vec4 w = modelMatrix * vec4(position, 1.0); vW = w.xyz;
+    gl_Position = projectionMatrix * viewMatrix * w; }`,
+  fragmentShader: FOG + `uniform sampler2D map; uniform vec3 uLight; varying vec2 vUv; varying vec3 vN; varying vec3 vW;
+    void main(){ vec4 t = texture2D(map, vUv); if (t.a < 0.5) discard;
+      vec3 l0 = normalize(vec3(0.2, 1.0, -0.7)), l1 = normalize(vec3(-0.2, 1.0, 0.7));
+      float sh = min(1.0, 0.45 + 0.6 * (max(dot(vN, l0), 0.0) + max(dot(vN, l1), 0.0)));
+      vec3 c = t.rgb * sh * uLight; vec3 d = vW - camPos; float dist = length(d);
+      c = mix(c, fogColour(d / dist), clamp((dist - fogNear) / (fogFar - fogNear), 0.0, 1.0));
+      gl_FragColor = vec4(c, 1.0); }` });
+function boxUV(w, h, d, u, v, TW, TH, infl = 0) {
+  const g = new THREE.BoxGeometry(w + infl * 2, h + infl * 2, d + infl * 2);
+  const uv = g.attributes.uv;
+  const R = { right: [u, v + d, d, h], left: [u + d + w, v + d, d, h], top: [u + d, v, w, d], bottom: [u + d + w, v, w, d], front: [u + d, v + d, w, h], back: [u + 2 * d + w, v + d, w, h] };
+  const order = ['left', 'right', 'top', 'bottom', 'front', 'back'];      // BoxGeometry: +x, -x, +y, -y, +z (front), -z
+  for (let f = 0; f < 6; f++) { const [x, y, ww, hh] = R[order[f]];
+    for (let k = 0; k < 4; k++) { const cu = uv.getX(f * 4 + k), cv = uv.getY(f * 4 + k);
+      let uu = x + cu * ww, vv = y + (1 - cv) * hh;
+      if (order[f] === 'bottom') vv = y + cv * hh;
+      uv.setXY(f * 4 + k, uu / TW, 1 - vv / TH); } }
+  return g;
+}
+const PX = 1 / 16;
+// ---- the door (west wall, hinge at its north edge, swings in to the east)
+const door = new THREE.Group(); scene.add(door); const doorPivot = new THREE.Group(); door.add(doorPivot);
+{
+  const D = meta.door; door.position.set(D.x, D.y, D.z);
+  const mk = (layer, y0) => { const g = new THREE.BoxGeometry(3 * PX, 1, 1); g.translate(1.5 * PX, y0 + 0.5, 0.5);
+    const n = g.attributes.position.count, a = new Float32Array(n * 3), uvA = g.attributes.uv;
+    for (let i = 0; i < n; i++) { a[i * 3] = uvA.getX(i); a[i * 3 + 1] = 1 - uvA.getY(i); a[i * 3 + 2] = layer; }
+    g.setAttribute('aUV', new THREE.BufferAttribute(a, 3)); g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(n * 3).fill(1), 3)); return g; };
+  doorPivot.add(new THREE.Mesh(mk(34, 0), MAT.cutout)); doorPivot.add(new THREE.Mesh(mk(33, 1), MAT.cutout));
+}
+// ---- the sign by the path (faces west, toward the meadow)
+const signTex = await nearestTex('sign.png');
+{
+  const S = meta.sign, grp = new THREE.Group(); grp.position.set(S.x + 0.5, S.y, S.z + 0.5); grp.rotation.y = -Math.PI / 2; scene.add(grp);
+  const m = entMat(signTex); m.uniforms.uLight.value.copy(lightAt(new THREE.Vector3(S.x + 0.5, S.y + 1.2, S.z + 0.5)));
+  const post = new THREE.Mesh(new THREE.BoxGeometry(2 * PX, 14 * PX, 2 * PX), m); post.position.y = 7 * PX; grp.add(post);
+  const board = new THREE.Mesh(new THREE.BoxGeometry(24 * PX, 12 * PX, 2 * PX), m); board.position.y = 20 * PX; grp.add(board);
+  const uv = board.geometry.attributes.uv;
+  for (let i = 0; i < uv.count; i++) { const f = Math.floor(i / 4); if (f < 4) uv.setXY(i, uv.getX(i) * 0.12, uv.getY(i) * 0.25); }
+  const puv = post.geometry.attributes.uv; for (let i = 0; i < puv.count; i++) puv.setXY(i, puv.getX(i) * 0.05, puv.getY(i) * 0.5);
+}
+// ---- the painting on the north wall inside
+{
+  const P = meta.painting, t = await nearestTex('painting.png');
+  const m = entMat(t, { side: THREE.DoubleSide }); m.uniforms.uLight.value.copy(lightAt(new THREE.Vector3((P.x0 + P.x1) / 2, P.y0 + 0.5, P.z + 0.5)));
+  const pl = new THREE.Mesh(new THREE.PlaneGeometry(P.x1 - P.x0, P.y1 - P.y0), m); pl.position.set((P.x0 + P.x1) / 2, (P.y0 + P.y1) / 2, P.z); scene.add(pl);
+}
+// ---- the wolf, built like the classic model: legs 8 px, body 6 x 6 x 9 with the ruff over the shoulders, the head
+// low and forward, the snout out front, ears on top.  It faces +z.
+const wolfMat = entMat(await nearestTex('wolf2.png'));
+const wolf = new THREE.Group(); scene.add(wolf);
+const W = {};
+{
+  const part = (w, h, d, u, v) => { const m = new THREE.Mesh(boxUV(w, h, d, u, v, 64, 32), wolfMat); m.scale.setScalar(PX); return m; };
+  const s = PX;
+  W.torso = new THREE.Group(); wolf.add(W.torso);          // pivot over the shoulders
+  W.torso.position.set(0, 11 * s, 2 * s);
+  const body = part(6, 9, 6, 18, 14); body.rotation.x = Math.PI / 2; body.position.set(0, 0, -3.5 * s); W.torso.add(body);   // z from -8 to +1
+  const mane = part(8, 6, 7, 21, 0); mane.position.set(0, 0.5 * s, 1.5 * s); W.torso.add(mane);                              // z from -2 to +5
+  W.tailP = new THREE.Group(); W.tailP.position.set(0, 2 * s, -8 * s); W.torso.add(W.tailP);
+  const tail = part(2, 8, 2, 9, 18); tail.position.set(0, -4 * s, 0); W.tailP.add(tail);
+  W.head = new THREE.Group(); W.head.position.set(0, 10.5 * s, 7.5 * s); wolf.add(W.head);
+  const head = part(6, 6, 4, 0, 0); head.position.set(0, 0, 0); W.head.add(head);                          // z 5.5 .. 9.5
+  const snout = part(3, 3, 4, 0, 10); snout.position.set(0, -1.5 * s, 3.5 * s); W.head.add(snout);          // out to 11.5
+  W.ears = [];
+  for (const sx of [-2, 2]) { const ep = new THREE.Group(); ep.position.set(sx * s, 3 * s, -0.5 * s); W.head.add(ep);
+    const ear = part(2, 2, 1, 16, 14); ear.position.set(0, 1 * s, 0); ep.add(ear); W.ears.push(ep); }
+  W.legs = [];
+  for (const [lx, lz, front] of [[-1.5, 4, 1], [1.5, 4, 1], [-1.5, -5.5, 0], [1.5, -5.5, 0]]) { const lp = new THREE.Group(); wolf.add(lp);
+    const leg = part(2, 8, 2, 0, 18); leg.position.set(0, -4 * s, 0); lp.add(leg); W.legs.push({ g: lp, lx, lz, front }); }
+}
+function poseWolf(p) {
+  // p: x, y, z, yaw (deg, 0 = +z), sit 0..1, phase, walkAmt, headYaw/Pitch/Roll (deg), wag (rad), wagPhase, tailUp 0..1, ears 0..1
+  const s = PX, sit = p.sit;
+  wolf.position.set(p.x, p.y, p.z); wolf.rotation.y = THREE.MathUtils.degToRad(p.yaw);
+  const bob = Math.abs(Math.sin(p.phase)) * 0.5 * p.walkAmt;
+  // sitting: the rear goes down to the floor round the shoulders, the whole body comes back and down a little
+  W.torso.position.set(0, (11 + bob - 1.0 * sit) * s, (2 - 1.0 * sit) * s);
+  W.torso.rotation.x = -0.72 * sit;
+  W.tailP.rotation.order = 'YXZ';
+  W.tailP.rotation.x = 0.9 + 0.75 * p.tailUp - sit * (0.15 + 0.4 * (1 - p.tailUp));
+  W.tailP.rotation.y = Math.sin(p.wagPhase) * p.wag;
+  W.head.position.set(0, (10.5 + bob * 0.6 + 0.2 * sit) * s, (7.5 - 0.6 * sit) * s);
+  W.head.rotation.set(THREE.MathUtils.degToRad(p.headPitch), THREE.MathUtils.degToRad(p.headYaw), THREE.MathUtils.degToRad(p.headRoll), 'YXZ');
+  W.ears.forEach((e, i) => { e.rotation.x = -0.3 * (1 - p.ears); e.rotation.z = (i ? -1 : 1) * 0.18 * (1 - p.ears); });
+  for (const L of W.legs) {
+    const ph = p.phase + (L.front ? (L.lx > 0 ? Math.PI : 0) : (L.lx > 0 ? 0 : Math.PI));
+    const swing = Math.sin(ph) * 0.62 * p.walkAmt;
+    if (L.front) { L.g.position.set(L.lx * s, (8 + bob * 0.5) * s, (L.lz - 0.6 * sit) * s); L.g.rotation.x = swing * (1 - sit) + 0.32 * sit; }
+    else { L.g.position.set(L.lx * s, (8 - 6.4 * sit) * s, (L.lz + 1.5 * sit) * s); L.g.rotation.x = swing * (1 - sit) - 1.52 * sit; }
+  }
+  wolfMat.uniforms.uLight.value.copy(lightAt(new THREE.Vector3(p.x, p.y + 0.7, p.z)));
+}
+// ---- the player, in the channel's skin (slim arms), 0.9375 scale; walk and sneak
+const skinTex = await nearestTex('skin.png');
+const plMat = entMat(skinTex), plMat2 = entMat(skinTex, { side: THREE.DoubleSide });
+const player = new THREE.Group(); scene.add(player);
+const P = {};
+{
+  const sc = 0.9375 * PX;
+  const part = (w, h, d, u, v, u2, v2, infl) => { const g = new THREE.Group();
+    const a = new THREE.Mesh(boxUV(w, h, d, u, v, 64, 64), plMat); const b = new THREE.Mesh(boxUV(w, h, d, u2, v2, 64, 64, infl), plMat2);
+    g.add(a); g.add(b); g.scale.setScalar(sc); return g; };
+  P.root = new THREE.Group(); player.add(P.root);
+  P.hips = new THREE.Group(); P.hips.position.y = 12 * sc; P.root.add(P.hips);
+  P.chest = new THREE.Group(); P.hips.add(P.chest);
+  const body = part(8, 12, 4, 16, 16, 16, 32, 0.25); body.position.y = 6 * sc; P.chest.add(body);
+  P.head = new THREE.Group(); P.head.position.y = 12 * sc; P.chest.add(P.head);
+  const head = part(8, 8, 8, 0, 0, 32, 0, 0.5); head.position.y = 4 * sc; P.head.add(head);
+  P.armR = new THREE.Group(); P.armR.position.set(-5.5 * sc, 10 * sc, 0); P.chest.add(P.armR);
+  const ar = part(3, 12, 4, 40, 16, 40, 32, 0.25); ar.position.y = -4 * sc; P.armR.add(ar);
+  P.armL = new THREE.Group(); P.armL.position.set(5.5 * sc, 10 * sc, 0); P.chest.add(P.armL);
+  const al = part(3, 12, 4, 32, 48, 48, 48, 0.25); al.position.y = -4 * sc; P.armL.add(al);
+  P.legR = new THREE.Group(); P.legR.position.set(-2 * sc, 12 * sc, 0); P.root.add(P.legR);
+  const lr = part(4, 12, 4, 0, 16, 0, 32, 0.25); lr.position.y = -6 * sc; P.legR.add(lr);
+  P.legL = new THREE.Group(); P.legL.position.set(2 * sc, 12 * sc, 0); P.root.add(P.legL);
+  const ll = part(4, 12, 4, 16, 48, 0, 48, 0.25); ll.position.y = -6 * sc; P.legL.add(ll);
+  P.sc = sc;
+}
+function posePlayer(q) {
+  // q: x, y, z, yaw (deg, 0 = +z), walk phase, walkAmt, sneak 0..1, headPitch, headYaw (deg), armReach 0..1
+  const sc = P.sc;
+  player.position.set(q.x, q.y - q.sneak * 2.6 * sc, q.z); player.rotation.y = THREE.MathUtils.degToRad(q.yaw);
+  const sw = Math.sin(q.phase) * 0.7 * q.walkAmt;
+  P.chest.rotation.x = 0.5 * q.sneak;
+  P.legR.rotation.x = sw; P.legL.rotation.x = -sw;
+  P.legR.position.z = P.legL.position.z = -4 * sc * q.sneak;
+  P.armR.rotation.x = -sw * 0.8 - 0.1 * q.sneak - 0.9 * (q.reach || 0); P.armL.rotation.x = sw * 0.8 - 0.1 * q.sneak;
+  P.armR.rotation.z = 0.05; P.armL.rotation.z = -0.05;
+  P.head.rotation.set(THREE.MathUtils.degToRad(q.headPitch || 0) - 0.5 * q.sneak, THREE.MathUtils.degToRad(q.headYaw || 0), 0, 'YXZ');
+  const L = lightAt(new THREE.Vector3(q.x, q.y + 1.2, q.z)); plMat.uniforms.uLight.value.copy(L); plMat2.uniforms.uLight.value.copy(L);
+}
+// ---- hearts
+const heartTex = (() => { const c = document.createElement('canvas'); c.width = c.height = 9; const g = c.getContext('2d');
+  const rows = ['.##...##.', '#xx#.#xx#', '#xrr#rrr#', '#rrrrrrr#', '.#rrrrr#.', '..#rrr#..', '...#r#...', '....#....', '.........'];
+  rows.forEach((r, y) => [...r].forEach((ch, x) => { if (ch === '.') return; g.fillStyle = ch === '#' ? '#3a0606' : ch === 'x' ? '#ff9a9a' : '#e01818'; g.fillRect(x, y, 1, 1); }));
+  const t = new THREE.CanvasTexture(c); t.magFilter = THREE.NearestFilter; t.minFilter = THREE.NearestFilter; return t; })();
+const hearts = []; for (let i = 0; i < 8; i++) { const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: heartTex, transparent: true, depthWrite: false })); sp.visible = false; scene.add(sp); hearts.push(sp); }
+// ---- depth of field: render to a target with depth, then a gather blur by circle of confusion
+let RT = null;
+const dofMat = new THREE.ShaderMaterial({ uniforms: { tCol: { value: null }, tDep: { value: null }, near: { value: 0.05 }, far: { value: 1400 }, focus: { value: 2 },
+    aperture: { value: 0 }, maxR: { value: 12 }, res: { value: new THREE.Vector2() } }, depthTest: false, depthWrite: false,
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+  fragmentShader: `uniform sampler2D tCol; uniform sampler2D tDep; uniform float near; uniform float far; uniform float focus; uniform float aperture; uniform float maxR; uniform vec2 res; varying vec2 vUv;
+    float lin(float d){ return near * far / (far - d * (far - near)); }
+    float coc(vec2 uv){ float z = lin(texture2D(tDep, uv).r); return clamp(aperture * abs(z - focus) / max(z, 1e-3), 0.0, maxR); }
+    void main(){
+      float c0 = coc(vUv); vec3 acc = texture2D(tCol, vUv).rgb; float wsum = 1.0;
+      if (c0 > 0.5) {
+        for (int i = 0; i < 48; i++) {
+          float fi = float(i) + 0.5; float r = sqrt(fi / 48.0) * c0; float a = fi * 2.39996;
+          vec2 o = vec2(cos(a), sin(a)) * r / res; float cs = coc(vUv + o);
+          float w = smoothstep(r - 1.5, r, max(cs, c0 * 0.6));
+          acc += texture2D(tCol, vUv + o).rgb * w; wsum += w; }
+      }
+      gl_FragColor = vec4(acc / wsum, 1.0); }` });
+const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), dofMat); const qScene = new THREE.Scene(); qScene.add(quad); const qCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+window.READY = true;
+// ------------------------------------------------------------------ one frame
+window.renderView = (v) => {
+  const W_ = v.w || 540, H_ = v.h || 960;
+  renderer.setPixelRatio(1); renderer.setSize(W_, H_, false);
+  U.time.value = v.time || 0;
+  const se = THREE.MathUtils.degToRad(v.sunElev ?? 6), sa = THREE.MathUtils.degToRad(v.sunAz ?? 92);
+  U.sunDir.value.set(-Math.sin(sa) * Math.cos(se), Math.sin(se), Math.cos(sa) * Math.cos(se));
+  const k = v.dusk || 0; U.dusk.value = k; U.daylight.value = 1 - 0.62 * k;
+  // sunset colours (and a little later, dusk)
+  U.skyTop.value.setRGB(0.30 - 0.12 * k, 0.40 - 0.16 * k, 0.74 - 0.22 * k);
+  U.horizon.value.setRGB(0.80 - 0.25 * k, 0.66 - 0.24 * k, 0.70 - 0.18 * k);
+  U.glowCol.value.setRGB(1.0 - 0.1 * k, 0.62 - 0.2 * k, 0.36 - 0.12 * k);
+  CLOUD.col.setRGB(1.0 - 0.3 * k, 0.80 - 0.32 * k, 0.74 - 0.24 * k);
+  U.fogNear.value = v.fogNear ?? 90; U.fogFar.value = v.fogFar ?? 190;
+  camera.fov = v.fov || 70; camera.aspect = W_ / H_; camera.updateProjectionMatrix();
+  camera.position.set(...v.pos);
+  const yaw = THREE.MathUtils.degToRad(v.yaw), pitch = THREE.MathUtils.degToRad(v.pitch), roll = THREE.MathUtils.degToRad(v.roll || 0);
+  camera.rotation.order = 'YXZ'; camera.rotation.set(-pitch, Math.PI - yaw, roll);
+  camera.updateMatrixWorld(); U.camPos.value.copy(camera.position);
+  sky.position.copy(camera.position);
+  sun.position.copy(camera.position).addScaledVector(U.sunDir.value, 600); sun.lookAt(camera.position);
+  cloudGroup.position.set((v.time || 0) * 1.1 - 300, 0, -400);
+  doorPivot.rotation.y = Math.PI / 2 * (v.door || 0);
+  for (const m of doorPivot.children) { const c = m.geometry.attributes.color; for (let i = 0; i < c.count; i++) c.setXYZ(i, 0.62, 0.8, 0); c.needsUpdate = true; }
+  if (v.wolf) { wolf.visible = true; poseWolf(v.wolf); } else wolf.visible = false;
+  if (v.player) { player.visible = true; posePlayer(v.player); } else player.visible = false;
+  hearts.forEach((h, i) => { const q = (v.hearts || [])[i]; h.visible = !!q; if (q) { h.position.set(q[0], q[1], q[2]); h.scale.setScalar(q[3] || 0.3); } });
+  if (v.dof && v.dof.aperture > 0) {
+    if (!RT || RT.width !== W_ || RT.height !== H_) {
+      if (RT) RT.dispose();
+      RT = new THREE.WebGLRenderTarget(W_, H_, { samples: 4 }); RT.depthTexture = new THREE.DepthTexture(W_, H_); RT.depthTexture.type = THREE.FloatType;
+    }
+    renderer.setRenderTarget(RT); renderer.setClearColor(0x000000, 1); renderer.clear(); renderer.render(scene, camera);
+    renderer.setRenderTarget(null);
+    dofMat.uniforms.tCol.value = RT.texture; dofMat.uniforms.tDep.value = RT.depthTexture; dofMat.uniforms.focus.value = v.dof.focus;
+    dofMat.uniforms.aperture.value = v.dof.aperture * H_ / 960; dofMat.uniforms.maxR.value = (v.dof.maxR || 10) * H_ / 960; dofMat.uniforms.res.value.set(W_, H_);
+    dofMat.uniforms.near.value = camera.near; dofMat.uniforms.far.value = camera.far;
+    renderer.clear(); renderer.render(qScene, qCam);
+  } else {
+    renderer.setRenderTarget(null); renderer.setClearColor(0x000000, 1); renderer.clear(); renderer.render(scene, camera);
+  }
+  return renderer.domElement.toDataURL('image/png');
+};
+</script></body></html>
