@@ -1,0 +1,146 @@
+[
+ {
+  "line": "Ten years.",
+  "src": [
+   0.1,
+   0.816
+  ],
+  "offset": 2.85,
+  "words": [
+   [
+    "TEN",
+    2.85
+   ],
+   [
+    "YEARS",
+    3.291
+   ]
+  ]
+ },
+ {
+  "line": "Since I last played.",
+  "src": [
+   2.294,
+   3.548
+  ],
+  "offset": 2.501,
+  "words": [
+   [
+    "SINCE",
+    4.8
+   ],
+   [
+    "I",
+    5.171
+   ],
+   [
+    "LAST",
+    5.322
+   ],
+   [
+    "PLAYED",
+    5.694
+   ]
+  ]
+ },
+ {
+  "line": "The grass grew over the path.",
+  "src": [
+   5.467,
+   7.035
+  ],
+  "offset": 2.725,
+  "words": [
+   [
+    "THE",
+    8.1
+   ],
+   [
+    "GRASS",
+    8.333
+   ],
+   [
+    "GREW",
+    8.82
+   ],
+   [
+    "OVER",
+    9.099
+   ],
+   [
+    "THE",
+    9.331
+   ],
+   [
+    "PATH",
+    9.459
+   ]
+  ]
+ },
+ {
+  "line": "But he...",
+  "src": [
+   8.987,
+   9.595
+  ],
+  "offset": 4.272,
+  "words": [
+   [
+    "BUT",
+    13.2
+   ],
+   [
+    "HE",
+    13.502
+   ]
+  ]
+ },
+ {
+  "line": "was still here.",
+  "src": [
+   10.984,
+   11.891
+  ],
+  "offset": 3.802,
+  "words": [
+   [
+    "WAS",
+    14.75
+   ],
+   [
+    "STILL",
+    15.006
+   ],
+   [
+    "HERE",
+    15.412
+   ]
+  ]
+ },
+ {
+  "line": "He never stopped waiting.",
+  "src": [
+   17.619,
+   18.842
+  ],
+  "offset": 4.922,
+  "words": [
+   [
+    "HE",
+    22.5
+   ],
+   [
+    "NEVER",
+    22.732
+   ],
+   [
+    "STOPPED",
+    22.999
+   ],
+   [
+    "WAITING",
+    23.428
+   ]
+  ]
+ }
+]
