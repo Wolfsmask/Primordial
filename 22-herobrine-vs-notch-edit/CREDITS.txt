@@ -1,0 +1,18 @@
+Visuals: everything was made for this video. The two fighters (original character designs drawn as 64 x 64 skins: an
+ash-skinned hooded figure with white eyes, and a white-and-gold creator with golden eyes), their capes and blades, the
+night castle courtyard (a broken curtain wall with battlements, gatehouse towers, round corner towers and a lit keep, an
+obsidian portal, banners with an original sigil, braziers), the burning village and the spruce forest around it, the
+snow mountains on the horizon, the block textures, and the renderer: three.js with physically based lighting, soft
+shadows, bloom, ACES tone mapping, sparks, smoke, shockwaves, a pillar of light, lightning, slash arcs, a shield and
+3D chrome typography. Rendered at 60 fps, 1080 x 1920, with beat-synced edit effects (zoom punches, flashes, shake,
+chromatic aberration, radial blur, slow motion and a freeze frame).
+
+Typography: Cinzel by the Cinzel Project Authors (Natanael Gama), SIL Open Font License 1.1 (see source/web).
+
+Music: "Apologise in Brazil" by DJ QEELZZ and XSKAY11, the track supplied by the channel for this edit. It is a
+commercial recording and is NOT included in source/. A YouTube upload with it is likely to receive a Content ID claim
+(revenue goes to the rights holders; the video normally stays up). The cleanest route on Shorts is to upload the video
+and attach the official sound from the Shorts audio library, which credits the artists automatically.
+
+Herobrine and Notch are names from Minecraft community lore and history; the character designs in this video are
+original. This is a fan-made animation in a blocky-game style; it is not affiliated with Mojang or Microsoft.
