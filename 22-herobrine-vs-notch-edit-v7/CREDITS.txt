@@ -1,0 +1,20 @@
+Characters: the Herobrine and Notch skins were supplied by the channel (64 x 64 skins, source/web/herobrine2.png and
+source/web/notch2.png).
+
+Visuals: everything else was made for this video: the night castle courtyard (broken curtain wall, gatehouse towers,
+a lit keep, an obsidian portal, banners, braziers), the burning village and forest around it, the mountains on the
+horizon, the block textures, the hand-keyed animation on a bendy blocky rig, and the renderer: three.js with physically
+based lighting, soft shadows, bloom, glows on the models themselves, an anime line teleport, a barrier that cracks and
+shatters, lightning, sparks, smoke and fire. Rendered at 60 fps and upscaled to 1080 x 1920, with an anime-style edit
+pass (speed ramps, impact frames, speed lines, zoom punches, shake and chromatic aberration).
+
+Typography: Cinzel by the Cinzel Project Authors (Natanael Gama), SIL Open Font License 1.1 (see source/web).
+
+Music: "Apologise in Brazil" by DJ QEELZZ and XSKAY11, the track supplied by the channel for this edit (edited to fit
+the video). It is a commercial recording and is NOT included in source/. A YouTube upload with it is likely to receive
+a Content ID claim (revenue goes to the rights holders; the video normally stays up). The cleanest route on Shorts is
+to upload the video and attach the official sound from the Shorts audio library, which credits the artists
+automatically.
+
+Herobrine and Notch are names from Minecraft community lore and history. This is a fan-made animation in a blocky-game
+style; it is not affiliated with Mojang or Microsoft.
