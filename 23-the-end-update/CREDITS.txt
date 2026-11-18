@@ -1,0 +1,19 @@
+Visuals: everything was made for this video. The End is rebuilt from scratch: a main island with obsidian pillars,
+crystals and the exit portal, and floating isles round it (a grove of glowing trees, an end city of purpur towers,
+crystal spires, a chorus forest, drifting debris, a gateway), all generated in Python and meshed as voxels with
+ambient occlusion. The block textures are original 16 x 16 pixel art. The dragon is a blocky model built from boxes.
+The renderer is a shader pipeline in the spirit of the one made for the bleedout spot video, designed for the End: an
+HDR scene, a void sky with a nebula, stars and an eclipsed sun with its corona, a glowing void sea far below, void mist
+raymarched with in-scattering from the eclipse and the crystals, crepuscular rays, a bloom pyramid and a filmic
+tonemap. The phone lock screen and notifications are an original design drawn for this video.
+
+Typography: Cinzel by the Cinzel Project Authors (Natanael Gama), SIL Open Font License 1.1 (see source/web).
+Interface and subtitles: Inter by Rasmus Andersson, SIL Open Font License 1.1.
+
+Music: "Undress Rehearsal (Hardtekk Super Slowed)" by VXLTAGE, the track supplied by the channel, edited for this
+video (a tape stop before the drop, the break pulled under water, an echo-out ending). It is a commercial recording
+and is NOT included in source/. A YouTube upload with it is likely to receive a Content ID claim (revenue goes to the
+rights holders; the video normally stays up). The lyric subtitles were transcribed from the vocal by ear.
+
+This is a fan-made animation in a blocky-game style. It is not affiliated with Mojang, Microsoft or Rockstar Games;
+"The End Update" is imagined, and GTA VI is only mentioned in the joke.

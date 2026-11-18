@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>the end update</title>
+<style>html,body{margin:0;background:#000;overflow:hidden}</style>
+<script type="importmap">{"imports":{"three":"./node_modules/three/build/three.module.js","three/addons/":"./node_modules/three/examples/jsm/"}}</script>
+</head><body>
+<script type="module">
+// The End, rebuilt: a shader pipeline in the spirit of the bleedout spot's (HDR scene, volumetric void mist raymarched at
+// half resolution with in-scattering from the eclipse and the crystals, crepuscular rays, a bloom pyramid, Lottes tonemap),
+// with an End sky (the void, a nebula, stars, an eclipsed sun with its corona), a glowing void sea far below, crystals
+// and their beams, the exit portal's starfield, void falls pouring off the island rims, drifting motes, and a blocky dragon.
+import * as THREE from 'three';
+import { TTFLoader } from 'three/addons/loaders/TTFLoader.js';
+import { Font } from 'three/addons/loaders/FontLoader.js';
+import { TextGeometry } from 'three/addons/geometries/TextGeometry.js';
+const DEG = Math.PI / 180;
+const dirYE = (yaw, el) => new THREE.Vector3(-Math.sin(yaw * DEG) * Math.cos(el * DEG), Math.sin(el * DEG), -Math.cos(yaw * DEG) * Math.cos(el * DEG));
+const SC = await (await fetch('scene.json')).json();
+const ECL = dirYE(SC.eclipse.yaw, SC.eclipse.el);
+const ECL_COL = new THREE.Vector3(0.80, 0.72, 1.0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1);
+renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.NoToneMapping; renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, 9 / 16, 0.1, 9000);
+const U = { time: { value: 0 } };
+
+const NOISE = `
+float hash12(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
+float hash13(vec3 p3) { p3 = fract(p3 * 0.1031); p3 += dot(p3, p3.zyx + 31.32); return fract((p3.x + p3.y) * p3.z); }
+float vn3(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+  float a = mix(mix(hash13(i), hash13(i + vec3(1,0,0)), f.x), mix(hash13(i + vec3(0,1,0)), hash13(i + vec3(1,1,0)), f.x), f.y);
+  float b = mix(mix(hash13(i + vec3(0,0,1)), hash13(i + vec3(1,0,1)), f.x), mix(hash13(i + vec3(0,1,1)), hash13(i + vec3(1,1,1)), f.x), f.y);
+  return mix(a, b, f.z); }
+float fbm3(vec3 p) { float s = 0.0, a = 0.5; for (int i = 0; i < 5; i++) { s += a * vn3(p); p = p * 2.02 + 3.1; a *= 0.5; } return s; }
+float vn2(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash12(i), hash12(i + vec2(1, 0)), f.x), mix(hash12(i + vec2(0, 1)), hash12(i + vec2(1, 1)), f.x), f.y); }
+float fbm2(vec2 p) { float s = 0.0, a = 0.5; for (int i = 0; i < 5; i++) { s += a * vn2(p); p = p * 2.03 + 7.1; a *= 0.5; } return s; }
+float hg(float c, float g) { float g2 = g * g; return (1.0 - g2) / (12.566 * pow(max(1.0 + g2 - 2.0 * g * c, 1e-4), 1.5)); }
+`;
+
+// ------------------------------------------------------------------ the sky: the void, a nebula, stars, the eclipse
+const SKY_GLSL = NOISE + `
+uniform vec3 eclDir; uniform float uTime; uniform float uNeb; uniform float uEcl;
+vec3 voidSky(vec3 rd) {
+  vec3 col = mix(vec3(0.006, 0.002, 0.012), vec3(0.030, 0.008, 0.050), smoothstep(0.45, -0.35, rd.y));
+  col += vec3(0.08, 0.02, 0.13) * exp(-abs(rd.y + 0.06) * 9.0) * 0.4;                         // the void sea's glow on the horizon
+  // nebula: two layers of slow cloud, magenta and teal
+  vec3 q = rd * 2.2 + vec3(0.0, 0.0, uTime * 0.004);
+  float n1 = fbm3(q + fbm3(q * 1.7) * 0.9), n2 = fbm3(q * 1.6 + 4.7);
+  float band = exp(-pow(dot(rd, normalize(vec3(0.35, 0.22, -0.9))) * 1.6, 2.0));
+  col += uNeb * (vec3(0.30, 0.04, 0.42) * smoothstep(0.52, 0.88, n1) * (0.3 + band) + vec3(0.02, 0.22, 0.30) * smoothstep(0.55, 0.9, n2) * band * 0.8);
+  // stars
+  vec3 p = rd * 420.0; vec3 c = floor(p); float h = hash13(c);
+  if (h > 0.9965) { vec3 f = fract(p) - 0.5; float s = exp(-dot(f, f) * 40.0); float tw = 0.7 + 0.3 * sin(uTime * (2.0 + h * 9.0) + h * 40.0);
+    col += mix(vec3(0.75, 0.7, 1.0), vec3(1.0, 0.75, 0.95), fract(h * 97.0)) * s * tw * 6.0 * (h - 0.9965) / 0.0035; }
+  // the eclipse: a black disc, a white-violet corona torn into streamers, a wide halo
+  float cs = dot(rd, eclDir); float ang = acos(clamp(cs, -1.0, 1.0)); float R = 4.2 * 0.0174533;
+  vec3 ex = normalize(cross(eclDir, vec3(0.0, 1.0, 0.0))); vec3 ey = cross(ex, eclDir);
+  float th = atan(dot(rd, ey), dot(rd, ex));
+  float str = 0.55 + 0.45 * fbm2(vec2(th * 3.0, uTime * 0.05)) + 0.35 * pow(abs(sin(th * 5.0 + 0.7)), 6.0);
+  float cor = exp(-max(ang - R, 0.0) / (0.006 + 0.02 * str)) * step(R, ang);
+  vec3 ecl = vec3(1.0, 0.92, 1.0) * cor * 9.0 + vec3(0.6, 0.25, 1.0) * exp(-max(ang - R, 0.0) / 0.10) * 1.1 + vec3(0.35, 0.1, 0.6) * exp(-ang / 0.5) * 0.3;
+  ecl += vec3(1.0, 0.95, 1.0) * 70.0 * exp(-pow((th - 2.3) * 9.0, 2.0)) * exp(-max(ang - R, 0.0) / 0.0015) * step(R, ang);   // the diamond ring
+  col = (ang < R) ? col * 0.02 : col + ecl * uEcl;
+  return col;
+}`;
+const skyMat = new THREE.ShaderMaterial({
+  side: THREE.BackSide, depthWrite: false, depthTest: false,
+  uniforms: { eclDir: { value: ECL }, uTime: U.time, uNeb: { value: 1.0 }, uEcl: { value: 1.0 } },
+  vertexShader: `varying vec3 vDir; void main(){ vDir = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: SKY_GLSL + `varying vec3 vDir; void main(){ gl_FragColor = vec4(voidSky(normalize(vDir)), 1.0); }`
+});
+const sky = new THREE.Mesh(new THREE.SphereGeometry(5000, 48, 24), skyMat); sky.renderOrder = -10; sky.frustumCulled = false; scene.add(sky);
+
+// ------------------------------------------------------------------ the void sea, far below: dark glass with violet light moving in it
+const seaMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: U.time, eclDir: { value: ECL }, uNeb: { value: 1.0 }, uEcl: { value: 1.0 } },
+  vertexShader: `varying vec3 vW; void main(){ vec4 w = modelMatrix * vec4(position, 1.0); vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }`,
+  fragmentShader: SKY_GLSL + `varying vec3 vW;
+  void main(){
+    vec3 V = normalize(cameraPosition - vW); vec2 p = vW.xz * 0.012;
+    float w1 = fbm2(p + vec2(uTime * 0.03, uTime * 0.02)), w2 = fbm2(p * 2.3 - vec2(uTime * 0.05, 0.0));
+    float fil = pow(1.0 - abs(w1 - w2) * 2.2, 8.0);                                        // glowing filaments
+    vec3 n = normalize(vec3((w1 - 0.5) * 0.25, 1.0, (w2 - 0.5) * 0.25));
+    vec3 r = reflect(-V, n); float fr = 0.04 + 0.96 * pow(1.0 - max(dot(n, V), 0.0), 5.0);
+    vec3 col = vec3(0.012, 0.003, 0.025) + vec3(0.55, 0.16, 1.0) * fil * 0.8 + vec3(0.12, 0.03, 0.24) * fbm2(p * 0.5) * 0.4;
+    col = mix(col, voidSky(normalize(vec3(r.x, abs(r.y), r.z))), fr * 0.8);
+    float d = length(vW.xz - cameraPosition.xz); col *= exp(-d * 0.00012);
+    gl_FragColor = vec4(col, 1.0);
+  }`
+});
+const sea = new THREE.Mesh(new THREE.PlaneGeometry(12000, 12000), seaMat); sea.rotation.x = -Math.PI / 2; sea.position.y = -170; scene.add(sea);
+
+// ------------------------------------------------------------------ the world
+async function ltex(src, srgb = true) { const im = new Image(); im.src = src; await im.decode(); const t = new THREE.Texture(im);
+  t.magFilter = THREE.NearestFilter; t.minFilter = THREE.NearestMipmapLinearFilter; t.generateMipmaps = true; t.anisotropy = 8;
+  t.flipY = false; if (srgb) t.colorSpace = THREE.SRGBColorSpace; t.needsUpdate = true; return t; }
+const atlas = await ltex('atlas.png'), atlasEm = await ltex('atlas_em.png');
+const worldMat = (o) => new THREE.MeshLambertMaterial(Object.assign({ map: atlas, vertexColors: true, emissiveMap: atlasEm, emissive: new THREE.Color(1, 1, 1), emissiveIntensity: 1.5 }, o));
+const M = { opaque: worldMat({}), leaves: worldMat({ alphaTest: 0.5, side: THREE.DoubleSide }), plants: worldMat({ alphaTest: 0.5, side: THREE.DoubleSide }) };
+const meta = await (await fetch('meta.json')).json();
+const WORLD = [];
+for (const [g, info] of Object.entries(meta.groups)) {
+  const kind = g.split('_').pop(); if (!M[kind]) continue;
+  const buf = await (await fetch(info.file)).arrayBuffer(); const P = info.parts;
+  const pos = new Float32Array(buf, P.pos[0], P.pos[1]), idx = new Uint32Array(buf, P.idx[0], P.idx[1]);
+  const uv = new Uint16Array(buf, P.uv[0], P.uv[1]), nrm = new Int8Array(buf, P.nrm[0], P.nrm[1]), col = new Uint8Array(buf, P.col[0], P.col[1]);
+  for (const [ck, v0, nv, i0, ni] of info.chunks) {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos.subarray(v0 * 3, (v0 + nv) * 3), 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(nrm.subarray(v0 * 3, (v0 + nv) * 3), 3, true));
+    geo.setAttribute('uv', new THREE.BufferAttribute(uv.subarray(v0 * 2, (v0 + nv) * 2), 2, true));
+    geo.setAttribute('color', new THREE.BufferAttribute(col.subarray(v0 * 3, (v0 + nv) * 3), 3, true));
+    geo.setIndex(new THREE.BufferAttribute(idx.subarray(i0, i0 + ni), 1)); geo.computeBoundingSphere();
+    const mesh = new THREE.Mesh(geo, M[kind]); mesh.castShadow = true; mesh.receiveShadow = true; scene.add(mesh); WORLD.push(mesh);
+  }
+}
+// light: the eclipse's corona (cold white-violet, casting shadows round wherever we are) and the void's purple bounce
+const hemi = new THREE.HemisphereLight(new THREE.Color(0.40, 0.30, 0.62), new THREE.Color(0.16, 0.05, 0.26), 0.95); scene.add(hemi);
+const sun = new THREE.DirectionalLight(new THREE.Color(0.85, 0.78, 1.0), 2.4); sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048); Object.assign(sun.shadow.camera, { left: -70, right: 70, top: 70, bottom: -70, near: 1, far: 600 });
+sun.shadow.bias = -0.0006; sun.shadow.normalBias = 0.04; scene.add(sun); scene.add(sun.target);
+const PL = [0, 1, 2, 3].map(() => { const l = new THREE.PointLight(0xff60ff, 0, 40, 2); scene.add(l); return l; });
+
+// ------------------------------------------------------------------ crystals on the pillars, their beams
+const soft = (() => { const c = document.createElement('canvas'); c.width = c.height = 64; const g = c.getContext('2d'); const gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.35, 'rgba(255,255,255,0.45)'); gr.addColorStop(1, 'rgba(255,255,255,0)'); g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
+  const t = new THREE.CanvasTexture(c); return t; })();
+const glassMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(1.6, 1.2, 2.2), wireframe: true, transparent: true, opacity: 0.8 });
+const coreMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(5.0, 1.6, 4.4) });
+const CRY = SC.crystals.map((c, i) => {
+  const g = new THREE.Group(); g.position.set(...c);
+  const a = new THREE.Mesh(new THREE.BoxGeometry(1.6, 1.6, 1.6), glassMat), b = new THREE.Mesh(new THREE.BoxGeometry(1.15, 1.15, 1.15), glassMat), k = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.6, 0.6), coreMat);
+  g.add(a); g.add(b); g.add(k);
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: soft, color: new THREE.Color(1.6, 0.5, 1.5), transparent: true, depthWrite: false, blending: THREE.AdditiveBlending })); s.scale.setScalar(4.5); g.add(s);
+  scene.add(g); return { g, a, b, k, base: c, ph: i * 1.7 };
+});
+const beamMat = () => new THREE.ShaderMaterial({ uniforms: { uI: { value: 1 }, uTime: U.time, uCol: { value: new THREE.Color(1.0, 0.45, 1.0) } }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+  vertexShader: `varying vec2 vU; varying vec3 vN; varying vec3 vV; void main(){ vU = uv; vN = normalize(normalMatrix * normal); vec4 mv = modelViewMatrix * vec4(position, 1.0); vV = normalize(-mv.xyz); gl_Position = projectionMatrix * mv; }`,
+  fragmentShader: `uniform float uI; uniform float uTime; uniform vec3 uCol; varying vec2 vU; varying vec3 vN; varying vec3 vV;
+    void main(){ float f = abs(dot(vN, vV)); float core = pow(f, 3.0); float flow = 0.75 + 0.25 * sin(vU.y * 60.0 - uTime * 18.0);
+      vec3 c = mix(uCol, vec3(1.5, 1.4, 1.6), core) * (0.4 + 2.6 * core) * flow; gl_FragColor = vec4(c * uI, clamp(uI * (0.2 + core), 0.0, 1.0)); }` });
+const BEAMS = [...Array(12)].map(() => { const m = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 1, 14, 1, true), beamMat()); m.visible = false; scene.add(m); return m; });
+function beamFx(list) {
+  BEAMS.forEach((m, i) => { const b = list[i]; m.visible = !!b; if (!b) return;
+    const A = new THREE.Vector3(b[0], b[1], b[2]), Bv = new THREE.Vector3(b[3], b[4], b[5]); const L = A.distanceTo(Bv);
+    m.position.copy(A).add(Bv).multiplyScalar(0.5); m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), Bv.clone().sub(A).normalize());
+    m.scale.set(b[6], L, b[6]); m.material.uniforms.uI.value = b[7]; if (b.length > 10) m.material.uniforms.uCol.value.setRGB(b[8], b[9], b[10]); });
+}
+
+// ------------------------------------------------------------------ the exit portal and the dive: a starfield you fall through
+const PORTAL_GLSL = NOISE + `
+vec3 portalStars(vec3 d, float t) {
+  vec3 col = vec3(0.004, 0.010, 0.014);
+  for (int l = 0; l < 5; l++) {
+    float fl = float(l); vec3 p = d * (40.0 + fl * 35.0) + vec3(0.0, 0.0, t * (2.0 + fl * 1.5));
+    vec3 c = floor(p); float h = hash13(c + fl * 17.0);
+    if (h > 0.93) { vec3 f = fract(p) - 0.5; float s = exp(-dot(f, f) * 22.0);
+      vec3 tint = mix(vec3(0.2, 0.9, 0.8), vec3(0.75, 0.35, 1.0), fract(h * 53.0 + fl * 0.3));
+      col += tint * s * (1.5 + 2.5 * fract(h * 91.0)) / (1.0 + fl * 0.4); }
+  }
+  return col;
+}`;
+const portalMat = new THREE.ShaderMaterial({ uniforms: { uTime: U.time },
+  vertexShader: `varying vec3 vW; void main(){ vec4 w = modelMatrix * vec4(position, 1.0); vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }`,
+  fragmentShader: PORTAL_GLSL + `uniform float uTime; varying vec3 vW; void main(){ vec3 d = normalize(vW - cameraPosition); gl_FragColor = vec4(portalStars(d, uTime * 0.5) * 2.0, 1.0); }` });
+const portal = new THREE.Mesh(new THREE.CircleGeometry(SC.portal.r, 40), portalMat); portal.rotation.x = -Math.PI / 2; portal.position.set(...SC.portal.c); scene.add(portal);
+// the dive: inside the portal - stars streaming past, violet fog; drawn on a sphere round the camera
+const diveMat = new THREE.ShaderMaterial({ side: THREE.BackSide, depthWrite: false, depthTest: false, transparent: true,
+  uniforms: { uTime: U.time, uDive: { value: 0 }, uFwd: { value: new THREE.Vector3(0, 0, -1) }, uSpeed: { value: 1 } },
+  vertexShader: `varying vec3 vDir; void main(){ vDir = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: PORTAL_GLSL + `uniform float uTime; uniform float uDive; uniform vec3 uFwd; uniform float uSpeed; varying vec3 vDir;
+    void main(){ vec3 d = normalize(vDir); float c = dot(d, uFwd);
+      vec3 ax = normalize(cross(uFwd, vec3(0.0, 1.0, 0.01))); vec3 ay = cross(ax, uFwd); float th = atan(dot(d, ay), dot(d, ax));
+      float r = sqrt(max(1.0 - c * c, 1e-4)) / max(c + 1.05, 0.05);
+      float z = 1.0 / max(r, 0.02) + uTime * 6.0 * uSpeed;                                   // tunnel depth coordinate
+      float streak = 0.0;
+      for (int k = 0; k < 3; k++) { float fk = float(k); float a = floor(th * (14.0 + fk * 9.0) / 6.2832); float h = hash12(vec2(a, fk * 13.0));
+        float seg = fract(z * (0.15 + 0.05 * fk) + h * 7.0); streak += smoothstep(0.86, 1.0, seg) * step(0.55, h) * (1.0 - fk * 0.25); }
+      vec3 col = portalStars(d, uTime * 3.0 * uSpeed) * 0.7 + vec3(0.6, 0.35, 1.0) * streak * smoothstep(0.0, 0.6, r) * 1.2;
+      col += vec3(0.16, 0.04, 0.30) * exp(-r * 1.5) * 0.35 + vec3(0.9, 0.7, 1.0) * exp(-r * 30.0) * 0.9;
+      gl_FragColor = vec4(col, uDive); }` });
+const dive = new THREE.Mesh(new THREE.SphereGeometry(30, 48, 24), diveMat); dive.renderOrder = 50; dive.frustumCulled = false; dive.visible = false; scene.add(dive);
+// the end gateway's beam
+const gwBeam = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 1, 12, 1, true), beamMat()); gwBeam.material.uniforms.uCol.value.setRGB(0.7, 0.6, 1.0);
+gwBeam.position.set(SC.gateway[0], SC.gateway[1] + 60, SC.gateway[2]); gwBeam.scale.set(0.45, 120, 0.45); gwBeam.material.uniforms.uI.value = 0.6; scene.add(gwBeam);
+
+// ------------------------------------------------------------------ particles: drifting motes; void light pouring off the rims
+const MOTES = 1400; const moteG = new THREE.BufferGeometry(); const mp = new Float32Array(MOTES * 3), ms = new Float32Array(MOTES);
+for (let i = 0; i < MOTES; i++) { mp[i * 3] = Math.random(); mp[i * 3 + 1] = Math.random(); mp[i * 3 + 2] = Math.random(); ms[i] = Math.random(); }
+moteG.setAttribute('position', new THREE.BufferAttribute(mp, 3)); moteG.setAttribute('aSeed', new THREE.BufferAttribute(ms, 1));
+const moteMat = new THREE.ShaderMaterial({ transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  uniforms: { uTime: U.time, uCam: { value: new THREE.Vector3() }, uBox: { value: 46 }, uTex: { value: soft }, uK: { value: 1.0 } },
+  vertexShader: `attribute float aSeed; uniform float uTime; uniform vec3 uCam; uniform float uBox; varying float vA;
+    void main(){ vec3 p = position * uBox + vec3(sin(uTime * 0.3 + aSeed * 30.0), uTime * (0.25 + aSeed * 0.4), cos(uTime * 0.27 + aSeed * 20.0)) * 1.5;
+      p = uCam + mod(p - uCam + uBox * 0.5, uBox) - uBox * 0.5;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0); gl_Position = projectionMatrix * mv;
+      gl_PointSize = (0.05 + 0.12 * aSeed) * 1100.0 / max(-mv.z, 0.5); vA = (0.5 + 0.5 * sin(uTime * 2.0 + aSeed * 50.0)) * smoothstep(1.5, 5.0, -mv.z) * smoothstep(24.0, 12.0, -mv.z); }`,
+  fragmentShader: `uniform sampler2D uTex; uniform float uK; varying float vA; void main(){ vec4 t = texture2D(uTex, gl_PointCoord); gl_FragColor = vec4(vec3(2.2, 1.4, 2.8) * t.a * vA * uK, 1.0); }` });
+const motes = new THREE.Points(moteG, moteMat); motes.frustumCulled = false; scene.add(motes);
+const FALLN = 260; const fallG = new THREE.BufferGeometry(); const fp = [], fs = [], fo = [];
+for (const e of SC.falls) { const out = new THREE.Vector3(e[0], 0, e[2]); out.y = 0; out.normalize();
+  for (let i = 0; i < FALLN; i++) { fp.push(e[0], e[1], e[2]); fs.push(Math.random()); fo.push(out.x, Math.random() * 6.283, out.z); } }
+fallG.setAttribute('position', new THREE.Float32BufferAttribute(fp, 3)); fallG.setAttribute('aSeed', new THREE.Float32BufferAttribute(fs, 1)); fallG.setAttribute('aOut', new THREE.Float32BufferAttribute(fo, 3));
+const fallMat = new THREE.ShaderMaterial({ transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, uniforms: { uTime: U.time, uTex: { value: soft } },
+  vertexShader: `attribute float aSeed; attribute vec3 aOut; uniform float uTime; varying float vA;
+    void main(){ float t = fract(uTime * 0.12 + aSeed); float ang = aOut.y;
+      vec3 p = position + vec3(aOut.x, 0.0, aOut.z) * (t * 6.0 + 1.0) + vec3(cos(ang), 0.0, sin(ang)) * (0.6 + t * 2.5) + vec3(0.0, -t * t * 70.0 - t * 4.0, 0.0);
+      vec4 mv = modelViewMatrix * vec4(p, 1.0); gl_Position = projectionMatrix * mv; gl_PointSize = (0.35 + 0.6 * aSeed) * 1100.0 / max(-mv.z, 1.0);
+      vA = (1.0 - t) * smoothstep(0.0, 0.05, t); }`,
+  fragmentShader: `uniform sampler2D uTex; varying float vA; void main(){ vec4 t = texture2D(uTex, gl_PointCoord); gl_FragColor = vec4(vec3(1.1, 0.45, 1.8) * t.a * vA, 1.0); }` });
+const falls = new THREE.Points(fallG, fallMat); falls.frustumCulled = false; scene.add(falls);
+const glowSprites = SC.glows.map(g => { const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: soft, color: new THREE.Color(1.0, 0.45, 1.3), transparent: true, opacity: 0.55, depthWrite: false, blending: THREE.AdditiveBlending }));
+  s.position.set(g[0], g[1], g[2]); s.scale.setScalar(g[3] * 4.5); scene.add(s); return s; });
+for (const l of SC.lamps) { const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: soft, color: new THREE.Color(1.4, 1.2, 1.6), transparent: true, opacity: 0.7, depthWrite: false, blending: THREE.AdditiveBlending }));
+  s.position.set(...l); s.scale.setScalar(2.2); scene.add(s); }
+
+// ------------------------------------------------------------------ the dragon: a blocky beast built from boxes, laid along a spine
+const dTex = (() => { const c = document.createElement('canvas'); c.width = c.height = 32; const g = c.getContext('2d');
+  for (let y = 0; y < 32; y++) for (let x = 0; x < 32; x++) { const v = 14 + Math.floor(Math.random() * 14) + ((x + (y % 2) * 2) % 4 === 0 ? 10 : 0); g.fillStyle = `rgb(${v},${v - 4},${v + 6})`; g.fillRect(x, y, 1, 1); }
+  const t = new THREE.CanvasTexture(c); t.magFilter = THREE.NearestFilter; t.colorSpace = THREE.SRGBColorSpace; return t; })();
+const dMat = new THREE.MeshLambertMaterial({ map: dTex, color: new THREE.Color(0.55, 0.5, 0.62) });
+dMat.onBeforeCompile = (sh) => { sh.fragmentShader = sh.fragmentShader.replace('#include <emissivemap_fragment>',
+  `#include <emissivemap_fragment>
+  { float fr = 1.0 - clamp(dot(normal, normalize(vViewPosition)), 0.0, 1.0); totalEmissiveRadiance += vec3(0.5, 0.18, 0.9) * fr * fr * fr * 0.9; }`); };
+const memMat = new THREE.MeshLambertMaterial({ color: new THREE.Color(0.08, 0.05, 0.12), side: THREE.DoubleSide, transparent: true, opacity: 0.94 });
+const eyeMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(6.0, 1.2, 6.0) });
+const DR = { root: new THREE.Group(), segs: [], wings: [] };
+const box = (w, h, d, m) => new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m || dMat);
+const NJ = 18;            // spine joints, head first
+const SEGW = [2.6, 2.1, 1.9, 1.85, 1.9, 2.2, 3.6, 4.2, 4.2, 3.6, 2.4, 1.9, 1.6, 1.3, 1.05, 0.8, 0.6];
+for (let i = 0; i < NJ - 1; i++) { const w = SEGW[i]; const m = box(w, w * (i >= 6 && i <= 9 ? 0.85 : 0.95), 1, dMat); m.castShadow = true; DR.root.add(m); DR.segs.push(m);
+  if (i >= 1 && i <= 13 && i % 1 === 0) { const sp = box(0.25, w * 0.5, 0.5, dMat); sp.position.set(0, w * 0.6, 0); m.add(sp); } }
+const head = DR.segs[0];
+const jaw = box(1.5, 0.45, 2.2); jaw.position.set(0, -0.7, 0.4); head.add(jaw); DR.jaw = jaw;
+for (const s of [-1, 1]) { const e = box(0.32, 0.2, 0.2, eyeMat); e.position.set(s * 0.8, 0.35, 0.35); head.add(e);
+  const hn = box(0.3, 0.3, 1.2); hn.position.set(s * 0.55, 0.9, -0.5); hn.rotation.x = -0.6; head.add(hn);
+  const ns = box(0.3, 0.25, 0.3); ns.position.set(s * 0.45, 0.55, 1.3); head.add(ns); }
+const eyeGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map: soft, color: new THREE.Color(2.2, 0.5, 2.2), transparent: true, depthWrite: false, blending: THREE.AdditiveBlending })); eyeGlow.scale.setScalar(3.2); eyeGlow.position.set(0, 0.35, 0.6); head.add(eyeGlow);
+for (const s of [-1, 1]) {           // each wing: an arm in two bones, a membrane under each
+  const shoulder = new THREE.Group(); DR.root.add(shoulder);
+  const b1 = box(7.5, 0.6, 0.6); b1.position.set(s * 3.75, 0, 0); shoulder.add(b1);
+  const m1 = new THREE.Mesh(new THREE.BoxGeometry(7.5, 0.08, 6), memMat); m1.position.set(s * 3.75, -0.1, -2.9); shoulder.add(m1);
+  const elbow = new THREE.Group(); elbow.position.set(s * 7.5, 0, 0); shoulder.add(elbow);
+  const b2 = box(6.5, 0.45, 0.45); b2.position.set(s * 3.25, 0, 0); elbow.add(b2);
+  const m2 = new THREE.Mesh(new THREE.BoxGeometry(6.5, 0.07, 4.6), memMat); m2.position.set(s * 3.25, -0.08, -2.2); elbow.add(m2);
+  [b1, m1, b2, m2].forEach(o => o.castShadow = true);
+  DR.wings.push({ s, shoulder, elbow });
+}
+const legs = [];
+for (const [s, z] of [[-1, 0], [1, 0], [-1, 1], [1, 1]]) { const l = box(1.0, 3.0, 1.0); DR.root.add(l); legs.push({ l, s, z }); }
+scene.add(DR.root); DR.root.visible = false;
+// breath: a stream of violet motes from the mouth
+const BRN = 600; const brG = new THREE.BufferGeometry(); const brP = new Float32Array(BRN * 3), brS = new Float32Array(BRN);
+for (let i = 0; i < BRN; i++) brS[i] = Math.random();
+brG.setAttribute('position', new THREE.BufferAttribute(brP, 3)); brG.setAttribute('aSeed', new THREE.BufferAttribute(brS, 1));
+const brMat = new THREE.ShaderMaterial({ transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, uniforms: { uTex: { value: soft }, uA: { value: 0 } },
+  vertexShader: `attribute float aSeed; uniform float uA; varying float vA; void main(){ vec4 mv = modelViewMatrix * vec4(position, 1.0); gl_Position = projectionMatrix * mv;
+    gl_PointSize = (0.8 + 1.8 * aSeed) * 1100.0 / max(-mv.z, 1.0); vA = uA; }`,
+  fragmentShader: `uniform sampler2D uTex; varying float vA; void main(){ vec4 t = texture2D(uTex, gl_PointCoord); gl_FragColor = vec4(vec3(1.3, 0.35, 1.8) * t.a * vA, 1.0); }` });
+const breath = new THREE.Points(brG, brMat); breath.frustumCulled = false; breath.visible = false; scene.add(breath);
+const _a = new THREE.Vector3(), _b = new THREE.Vector3(), _m = new THREE.Matrix4(), _up = new THREE.Vector3();
+function poseDragon(d) {
+  if (!d) { DR.root.visible = false; breath.visible = false; return; }
+  DR.root.visible = true; const J = d.spine; _up.set(...(d.up || [0, 1, 0]));
+  for (let i = 0; i < NJ - 1; i++) { _a.set(...J[i]); _b.set(...J[i + 1]); const m = DR.segs[i];
+    m.position.copy(_a).add(_b).multiplyScalar(0.5); _m.lookAt(_a, _b, _up); m.quaternion.setFromRotationMatrix(_m);
+    m.scale.z = Math.max(0.3, _a.distanceTo(_b) * 1.05); }
+  head.scale.z = Math.max(head.scale.z, 3.4);
+  DR.jaw.rotation.x = d.jaw || 0;
+  // wings at the shoulders (joint 7), legs under the body
+  const sh = DR.segs[6]; for (const w of DR.wings) { w.shoulder.position.copy(sh.position); w.shoulder.quaternion.copy(sh.quaternion);
+    w.shoulder.translateY(0.9); w.shoulder.rotateZ(w.s * d.flap); w.elbow.rotation.z = w.s * d.flap * 0.9 + w.s * (d.fold || 0); }
+  for (const g of legs) { const seg = DR.segs[g.z ? 9 : 7]; g.l.position.copy(seg.position); g.l.quaternion.copy(seg.quaternion); g.l.translateX(g.s * 1.8); g.l.translateY(-2.4); g.l.rotateX(0.8); }
+  breath.visible = !!d.breath; brMat.uniforms.uA.value = d.breath || 0;
+  if (d.breath) { const P = brG.attributes.position; const hp = new THREE.Vector3(...J[0]), dir = new THREE.Vector3(...J[0]).sub(new THREE.Vector3(...J[1])).normalize();
+    for (let i = 0; i < BRN; i++) { const s = brS[i]; const t = (d.t * 1.7 + s) % 1; const spread = t * 3.5;
+      P.setXYZ(i, hp.x + dir.x * t * 24 + Math.sin(s * 91) * spread, hp.y + dir.y * t * 24 + Math.cos(s * 37) * spread - t * t * 4, hp.z + dir.z * t * 24 + Math.sin(s * 53) * spread); }
+    P.needsUpdate = true; }
+}
+
+// ------------------------------------------------------------------ the title, in 3D
+const font = new Font(new TTFLoader().parse(await (await fetch('Cinzel.ttf')).arrayBuffer()));
+function title(text, size) { const g = new TextGeometry(text, { font, size, height: size * 0.25, curveSegments: 6, bevelEnabled: true, bevelThickness: size * 0.05, bevelSize: size * 0.03, bevelSegments: 3 });
+  g.computeBoundingBox(); const bb = g.boundingBox; g.translate(-(bb.max.x + bb.min.x) / 2, -(bb.max.y + bb.min.y) / 2, -(bb.max.z + bb.min.z) / 2);
+  const m = new THREE.MeshStandardMaterial({ color: new THREE.Color(0.85, 0.8, 0.95), metalness: 0.85, roughness: 0.28, emissive: new THREE.Color(0.55, 0.2, 0.9), emissiveIntensity: 0.6, transparent: true });
+  const o = new THREE.Mesh(g, m); o.visible = false; scene.add(o); return { o, m, w: bb.max.x - bb.min.x }; }
+const TITLES = { THE: title('THE', 0.5), END: title('END', 1.6), UPDATE: title('UPDATE', 0.62) };
+function titleFx(list) {
+  for (const k in TITLES) TITLES[k].o.visible = false;
+  for (const t of list) { const T = TITLES[t.id]; if (!T) continue; T.o.visible = true; T.m.opacity = t.opacity;
+    const p = new THREE.Vector3(...t.pos).applyMatrix4(camera.matrixWorld); T.o.position.copy(p); T.o.quaternion.copy(camera.quaternion);
+    T.o.rotateY(t.rot[1] * DEG); T.o.rotateX(t.rot[0] * DEG); T.o.scale.setScalar(t.scale); T.m.emissiveIntensity = 0.6 + (t.glow || 0); }
+}
+
+// ------------------------------------------------------------------ post: void mist (raymarched), composite, god rays, bloom, grade
+const fsScene = new THREE.Scene(), fsCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const fsQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2)); fsQuad.frustumCulled = false; fsScene.add(fsQuad);
+const FSV = `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
+function pass(mat, target) { fsQuad.material = mat; renderer.setRenderTarget(target); renderer.render(fsScene, fsCam); }
+const RT = {};
+function rt(w, h, depth) { const r = new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, depthBuffer: !!depth });
+  if (depth) r.depthTexture = new THREE.DepthTexture(w, h, THREE.FloatType); return r; }
+function ensureRTs(w, h) {
+  if (RT.w === w && RT.h === h) return;
+  for (const k of Object.keys(RT)) if (RT[k] && RT[k].dispose) RT[k].dispose();
+  RT.w = w; RT.h = h; RT.scene = rt(w, h, true); RT.vol = rt(Math.ceil(w / 2), Math.ceil(h / 2)); RT.comp = rt(w, h); RT.god = rt(Math.ceil(w / 4), Math.ceil(h / 4));
+  RT.blm = []; let bw = w, bh = h; for (let i = 0; i < 6; i++) { bw = Math.max(1, Math.ceil(bw / 2)); bh = Math.max(1, Math.ceil(bh / 2)); RT.blm.push(rt(bw, bh)); }
+  RT.blmU = RT.blm.map(r => rt(r.width, r.height));
+}
+const CAMU = { tDepth: { value: null }, invProj: { value: new THREE.Matrix4() }, camWorld: { value: new THREE.Matrix4() }, camPos: { value: new THREE.Vector3() }, near: { value: 0.1 }, far: { value: 9000 } };
+const RAY = `
+uniform sampler2D tDepth; uniform mat4 invProj; uniform mat4 camWorld; uniform vec3 camPos; uniform float near; uniform float far;
+vec3 viewDir(vec2 uv) { vec4 v = invProj * vec4(uv * 2.0 - 1.0, 1.0, 1.0); return normalize(v.xyz / v.w); }
+float sceneDist(vec2 uv, vec3 vd) { float d = texture2D(tDepth, uv).r; if (d >= 0.999999) return 1e9;
+  float z = d * 2.0 - 1.0; float vz = (2.0 * near * far) / (far + near - z * (far - near)); return vz / -vd.z; }
+`;
+const LIGHTS = 6;
+const volMat = new THREE.ShaderMaterial({
+  uniforms: Object.assign({}, CAMU, { eclDir: { value: ECL }, eclCol: { value: ECL_COL }, uTime: U.time, frame: { value: 0 }, dens: { value: 1.0 },
+    lp: { value: [...Array(LIGHTS)].map(() => new THREE.Vector4()) }, lc: { value: [...Array(LIGHTS)].map(() => new THREE.Vector3()) } }),
+  vertexShader: FSV,
+  fragmentShader: `uniform vec3 eclDir; uniform vec3 eclCol; uniform float uTime; uniform float frame; uniform float dens; uniform vec4 lp[${LIGHTS}]; uniform vec3 lc[${LIGHTS}]; varying vec2 vUv;` + RAY + NOISE + `
+  float density(vec3 p) {
+    float base = 0.00006 + 0.010 * exp(-max(p.y + 40.0, 0.0) / 10.0) + 0.03 * exp(-max(p.y + 120.0, 0.0) / 25.0);       // the void mist thickens below the isles
+    float n = fbm3(p * 0.025 + vec3(uTime * 0.02, 0.0, uTime * 0.015));
+    return base * (0.45 + 1.1 * n) * dens;
+  }
+  void main(){
+    vec3 vd = viewDir(vUv); vec3 rd = normalize((camWorld * vec4(vd, 0.0)).xyz); float tScene = sceneDist(vUv, vd);
+    float tMax = min(tScene, tScene > 1e8 ? 450.0 : 900.0); const int N = 28;
+    float jit = hash12(gl_FragCoord.xy + frame * 13.7);
+    float cosT = dot(rd, eclDir); float ph = hg(cosT, 0.75) * 1.1 + 0.08;
+    vec3 sum = vec3(0.0); float T = 1.0; float tPrev = 0.0;
+    for (int i = 0; i < N; i++) {
+      float u = (float(i) + jit) / float(N); float t = tMax * u * u; float dt = t - tPrev; tPrev = t;
+      vec3 p = camPos + rd * t; float s = density(p) * dt;
+      vec3 L = eclCol * ph * 0.45 + vec3(0.06, 0.02, 0.11) * 0.7;
+      for (int k = 0; k < ${LIGHTS}; k++) { vec3 d = lp[k].xyz - p; float r2 = dot(d, d); L += lc[k] * lp[k].w / (1.0 + r2 * 0.02); }
+      sum += T * L * s; T *= exp(-s * 1.1);
+      if (T < 0.02) break;
+    }
+    gl_FragColor = vec4(sum, T);
+  }`
+});
+const compMat = new THREE.ShaderMaterial({ uniforms: Object.assign({}, CAMU, { tScene: { value: null }, tVol: { value: null } }), vertexShader: FSV,
+  fragmentShader: `uniform sampler2D tScene; uniform sampler2D tVol; varying vec2 vUv;` + RAY + `
+  void main(){ vec4 v = texture2D(tVol, vUv); vec3 c = texture2D(tScene, vUv).rgb * v.a + v.rgb; gl_FragColor = vec4(c, 1.0); }` });
+const godMat = new THREE.ShaderMaterial({ uniforms: Object.assign({}, CAMU, { tComp: { value: null }, sunUv: { value: new THREE.Vector2() }, strength: { value: 0 } }), vertexShader: FSV,
+  fragmentShader: `uniform sampler2D tComp; uniform vec2 sunUv; uniform float strength; varying vec2 vUv;` + RAY + `
+  void main(){ vec2 d = (sunUv - vUv) / 60.0; vec2 p = vUv; vec3 s = vec3(0.0); float w = 1.0;
+    for (int i = 0; i < 60; i++) { vec3 c = texture2D(tComp, p).rgb; float sky = texture2D(tDepth, p).r >= 0.999999 ? 1.0 : 0.0;
+      float l = dot(c, vec3(0.3, 0.5, 0.2)); s += c * smoothstep(1.5, 8.0, l) * sky * w; w *= 0.966; p += d; }
+    gl_FragColor = vec4(s / 60.0 * strength, 1.0); }` });
+const downMat = new THREE.ShaderMaterial({ uniforms: { tSrc: { value: null }, texel: { value: new THREE.Vector2() }, first: { value: 0 } }, vertexShader: FSV,
+  fragmentShader: `uniform sampler2D tSrc; uniform vec2 texel; uniform float first; varying vec2 vUv;
+  vec3 s(vec2 o){ vec3 c = texture2D(tSrc, vUv + o * texel).rgb; if (first > 0.5) c = min(c, vec3(60.0)); return c; }
+  void main(){ vec3 c = s(vec2(0.0)) * 0.25 + (s(vec2(-1.0, -1.0)) + s(vec2(1.0, -1.0)) + s(vec2(-1.0, 1.0)) + s(vec2(1.0, 1.0))) * 0.125
+    + (s(vec2(-2.0, 0.0)) + s(vec2(2.0, 0.0)) + s(vec2(0.0, -2.0)) + s(vec2(0.0, 2.0))) * 0.0625; gl_FragColor = vec4(c, 1.0); }` });
+const upMat = new THREE.ShaderMaterial({ uniforms: { tLow: { value: null }, tHigh: { value: null }, texel: { value: new THREE.Vector2() } }, vertexShader: FSV,
+  fragmentShader: `uniform sampler2D tLow; uniform sampler2D tHigh; uniform vec2 texel; varying vec2 vUv;
+  void main(){ vec3 c = vec3(0.0);
+    for (int i = -1; i <= 1; i++) for (int j = -1; j <= 1; j++) c += texture2D(tLow, vUv + vec2(float(i), float(j)) * texel).rgb * (i == 0 && j == 0 ? 0.25 : (i == 0 || j == 0 ? 0.125 : 0.0625));
+    gl_FragColor = vec4(c + texture2D(tHigh, vUv).rgb, 1.0); }` });
+const finalMat = new THREE.ShaderMaterial({
+  uniforms: { tComp: { value: null }, tBloom: { value: null }, tGod: { value: null }, exposure: { value: 1.0 }, texel: { value: new THREE.Vector2() }, bloomK: { value: 0.09 },
+    godTint: { value: new THREE.Vector3(0.9, 0.7, 1.0) }, uTime: U.time, flash: { value: 0 }, black: { value: 0 }, vig: { value: 0.35 }, ca: { value: 0.0015 }, grain: { value: 0.03 },
+    zoom: { value: 1 }, shake: { value: new THREE.Vector2() }, bars: { value: 0 }, sat: { value: 1.0 }, contrast: { value: 1.0 }, tint: { value: new THREE.Vector3(1, 1, 1) }, lines: { value: 0 }, lineSeed: { value: 0 } },
+  vertexShader: FSV,
+  fragmentShader: NOISE + `uniform sampler2D tComp; uniform sampler2D tBloom; uniform sampler2D tGod; uniform float exposure; uniform vec2 texel; uniform float bloomK; uniform vec3 godTint;
+  uniform float uTime; uniform float flash; uniform float black; uniform float vig; uniform float ca; uniform float grain; uniform float zoom; uniform vec2 shake; uniform float bars;
+  uniform float sat; uniform float contrast; uniform vec3 tint; uniform float lines; uniform float lineSeed; varying vec2 vUv;
+  vec3 lottes(vec3 x) { const vec3 a = vec3(1.5), d = vec3(0.91), hdrMax = vec3(8.0), midIn = vec3(0.26), midOut = vec3(0.32);
+    vec3 b = (-pow(midIn, a) + pow(hdrMax, a) * midOut) / ((pow(hdrMax, a * d) - pow(midIn, a * d)) * midOut);
+    vec3 c = (pow(hdrMax, a * d) * pow(midIn, a) - pow(hdrMax, a) * pow(midIn, a * d) * midOut) / ((pow(hdrMax, a * d) - pow(midIn, a * d)) * midOut);
+    return pow(x, a) / (pow(x, a * d) * b + c); }
+  vec3 hdr(vec2 uv) { return texture2D(tComp, uv).rgb + texture2D(tBloom, uv).rgb * bloomK + texture2D(tGod, uv).rgb * godTint; }
+  void main(){
+    vec2 uv = (vUv - 0.5) / zoom + 0.5 + shake;
+    vec2 o = (uv - 0.5) * ca;
+    vec3 c = vec3(hdr(uv + o).r, hdr(uv).g, hdr(uv - o).b);
+    c = max(c * exposure * tint, 0.0); c = lottes(c);
+    float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    c = mix(vec3(l), c, 1.18 * sat);
+    c += vec3(0.02, -0.005, 0.045) * (1.0 - smoothstep(0.0, 0.4, l));          // violet in the shadows
+    c = mix(c, c * c * (3.0 - 2.0 * c), 0.25 * contrast);
+    vec2 q = vUv - 0.5; c *= 1.0 - vig * pow(clamp(length(q * vec2(1.0, 1.1)) * 1.3, 0.0, 1.0), 2.2);
+    // speed lines
+    if (lines > 0.0) { float a = atan(q.y, q.x * 0.5625); float h = hash12(vec2(floor(a * 60.0), lineSeed)); float rr = length(q * vec2(0.5625, 1.0));
+      c = mix(c, vec3(1.0, 0.92, 1.0), lines * step(0.9, h) * smoothstep(0.22, 0.6, rr) * 0.6); }
+    c += (hash12(gl_FragCoord.xy + fract(uTime * 7.0) * 100.0) - 0.5) * grain;
+    c = mix(c, vec3(1.0, 0.95, 1.0), flash); c *= 1.0 - black;
+    if (vUv.y < bars || vUv.y > 1.0 - bars) c = vec3(0.0);
+    c = pow(clamp(c, 0.0, 1.0), vec3(1.0 / 2.2));
+    gl_FragColor = vec4(c, 1.0);
+  }`
+});
+let FRAME = 0;
+window.renderView = (v) => {
+  const w = v.w, h = v.h; renderer.setSize(w, h, false); ensureRTs(w, h);
+  camera.aspect = w / h; camera.fov = v.fov || 55; camera.near = 0.1; camera.far = 9000; camera.updateProjectionMatrix();
+  camera.position.set(...v.pos); camera.up.set(...(v.up || [0, 1, 0])); camera.lookAt(new THREE.Vector3(...v.look)); if (v.roll) camera.rotateZ(v.roll * DEG); camera.updateMatrixWorld();
+  U.time.value = v.time || 0;
+  sky.position.copy(camera.position); dive.position.copy(camera.position);
+  skyMat.uniforms.uEcl.value = seaMat.uniforms.uEcl.value = v.ecl ?? 1.0;
+  // the corona's shadows, centred where we are looking
+  const c = new THREE.Vector3(...(v.shadowC || v.look)); sun.target.position.copy(c); sun.position.copy(c).addScaledVector(ECL, 300); sun.intensity = 2.4 * (v.ecl ?? 1.0);
+  // crystals: turning, bobbing; the nearest light the fog
+  CRY.forEach((k, i) => { const t = (v.time || 0) + k.ph; k.g.position.set(k.base[0], k.base[1] + Math.sin(t * 1.4) * 0.4, k.base[2]);
+    k.a.rotation.set(t * 0.9, t * 1.3, 0); k.b.rotation.set(-t * 1.1, 0, t * 0.8); k.k.rotation.set(t * 2.0, t * 1.7, 0); k.g.visible = !(v.broken || []).includes(i); });
+  beamFx(v.beams || []);
+  poseDragon(v.dragon);
+  dive.visible = (v.dive || 0) > 0; diveMat.uniforms.uDive.value = v.dive || 0; if (v.diveFwd) diveMat.uniforms.uFwd.value.set(...v.diveFwd); diveMat.uniforms.uSpeed.value = v.diveSpeed ?? 1;
+  moteMat.uniforms.uCam.value.copy(camera.position); moteMat.uniforms.uK.value = v.motes ?? 1;
+  titleFx(v.texts || []);
+  // point lights (and the same lights in the mist): the nearest glowing things
+  const lights = (v.lights || []);
+  PL.forEach((l, i) => { const q = lights[i]; if (q) { l.position.set(q[0], q[1], q[2]); l.intensity = q[3] * 40; l.color.setRGB(q[4], q[5], q[6]); l.distance = 60; } else l.intensity = 0; });
+  for (let i = 0; i < LIGHTS; i++) { const q = lights[i]; if (q) { volMat.uniforms.lp.value[i].set(q[0], q[1], q[2], q[3]); volMat.uniforms.lc.value[i].set(q[4], q[5], q[6]); } else volMat.uniforms.lp.value[i].set(0, -9999, 0, 0); }
+  // 1. scene
+  renderer.setRenderTarget(RT.scene); renderer.render(scene, camera);
+  // 2. void mist
+  CAMU.tDepth.value = RT.scene.depthTexture; CAMU.invProj.value.copy(camera.projectionMatrixInverse); CAMU.camWorld.value.copy(camera.matrixWorld);
+  CAMU.camPos.value.copy(camera.position); CAMU.near.value = camera.near; CAMU.far.value = camera.far;
+  volMat.uniforms.frame.value = (FRAME++) % 64; volMat.uniforms.dens.value = v.fog ?? 1.0;
+  pass(volMat, RT.vol);
+  compMat.uniforms.tScene.value = RT.scene.texture; compMat.uniforms.tVol.value = RT.vol.texture; pass(compMat, RT.comp);
+  // 3. rays from the corona
+  const sp = camera.position.clone().addScaledVector(ECL, 4000).project(camera);
+  const facing = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion).dot(ECL);
+  godMat.uniforms.tComp.value = RT.comp.texture; godMat.uniforms.sunUv.value.set(sp.x * 0.5 + 0.5, sp.y * 0.5 + 0.5);
+  godMat.uniforms.strength.value = (v.god ?? 1.0) * THREE.MathUtils.smoothstep(facing, 0.2, 0.8) * (sp.z < 1 ? 1 : 0); pass(godMat, RT.god);
+  // 4. bloom
+  let src = RT.comp;
+  for (let i = 0; i < RT.blm.length; i++) { downMat.uniforms.tSrc.value = src.texture; downMat.uniforms.texel.value.set(1 / src.width, 1 / src.height); downMat.uniforms.first.value = i === 0 ? 1 : 0; pass(downMat, RT.blm[i]); src = RT.blm[i]; }
+  let low = RT.blm[RT.blm.length - 1];
+  for (let i = RT.blm.length - 2; i >= 0; i--) { upMat.uniforms.tLow.value = low.texture; upMat.uniforms.tHigh.value = RT.blm[i].texture; upMat.uniforms.texel.value.set(1 / low.width, 1 / low.height); pass(upMat, RT.blmU[i]); low = RT.blmU[i]; }
+  // 5. grade, out
+  const e = v.post || {}; const fu = finalMat.uniforms;
+  fu.tComp.value = RT.comp.texture; fu.tBloom.value = low.texture; fu.tGod.value = RT.god.texture; fu.texel.value.set(1 / w, 1 / h);
+  fu.exposure.value = e.exposure ?? 1.0; fu.flash.value = e.flash ?? 0; fu.black.value = e.black ?? 0; fu.vig.value = e.vig ?? 0.35; fu.ca.value = e.ca ?? 0.0015; fu.grain.value = e.grain ?? 0.03;
+  fu.zoom.value = e.zoom ?? 1; fu.shake.value.set(...(e.shake || [0, 0])); fu.bars.value = e.bars ?? 0; fu.sat.value = e.sat ?? 1; fu.contrast.value = e.contrast ?? 1;
+  fu.tint.value.set(...(e.tint || [1, 1, 1])); fu.lines.value = e.lines ?? 0; fu.lineSeed.value = e.lineSeed ?? 0; fu.bloomK.value = e.bloom ?? 0.09;
+  pass(finalMat, null);
+  return renderer.domElement.toDataURL('image/png');
+};
+window.READY = true;
+</script></body></html>
