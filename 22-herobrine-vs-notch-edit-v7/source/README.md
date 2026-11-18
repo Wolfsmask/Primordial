@@ -1,4 +1,4 @@
-# Herobrine VS Notch (v7, beta): source
+# Herobrine VS Notch (v7): source
 
 Everything in the video is hand-keyed (no motion capture) on a blocky rig with bendy elbows, knees and waist, and
 rendered with three.js in headless Chromium.
