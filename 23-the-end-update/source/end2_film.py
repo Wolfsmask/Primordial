@@ -1,9 +1,9 @@
-"""Render the End Update video: 3D frames from web/end.html, the phone and the notification drawn in 2D, lyric subtitles
-on top.   python3 end_film.py test t1,t2,... [WxH] [sheet] | render a:b [WxH]   -> frames/f_%05d.png"""
+"""Render the End Update (v2): 3D frames from web/end2.html; the phone, the caption, the title and the last notification
+drawn in 2D.   python3 end2_film.py test t1,t2,... [WxH] [sheet] | render a:b [WxH]   -> frames/f_%05d.jpg"""
 import os, sys, time
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
-import end_anim as A
+import end2_anim as A
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FD = '/usr/share/fonts/opentype/inter/'
@@ -142,36 +142,97 @@ def notif(W, H, p):
     return img.convert('RGB')
 
 
-# ---------------------------------------------------------------- lyrics: karaoke, the word being sung lit and lifted
-def lyric(img, L, W, H):
-    if not L: return img
-    v = L['v']; words = L['words']; fs = W * 0.058; f = font('InterDisplay-ExtraBold.otf', fs)
-    a_in = ease((v - L['t0']) / 0.12); a_out = 1 - ease((v - (L['t1'] - 0.15)) / 0.15); A_ = a_in * a_out
-    if A_ <= 0.01: return img
-    d0 = ImageDraw.Draw(img); sp = d0.textlength(' ', font=f)
-    # wrap to two lines if needed
-    lines, cur, wsum = [], [], 0
-    for w, t in words:
-        ww = d0.textlength(w, font=f)
-        if cur and wsum + sp + ww > W * 0.86: lines.append(cur); cur, wsum = [], 0
-        cur.append((w, t, ww)); wsum += (sp if len(cur) > 1 else 0) + ww
-    if cur: lines.append(cur)
-    ov = Image.new('RGBA', (W, H), (0, 0, 0, 0)); glow = Image.new('RGBA', (W, H), (0, 0, 0, 0))
-    od, gd = ImageDraw.Draw(ov), ImageDraw.Draw(glow)
-    y0 = H * 0.735 - (len(lines) - 1) * fs * 0.62
-    for li, ln in enumerate(lines):
-        tot = sum(x[2] for x in ln) + sp * (len(ln) - 1); x = (W - tot) / 2; y = y0 + li * fs * 1.24
-        for w, t, ww in ln:
-            age = v - t; sung = age >= 0
-            pop = (1 + 0.10 * np.exp(-max(age, 0) / 0.12)) if sung else 1.0
-            col = (255, 255, 255, int(255 * A_)) if sung else (255, 255, 255, int(105 * A_))
-            fw = font('InterDisplay-ExtraBold.otf', fs * pop); dy = -fs * (pop - 1) * 0.6 - (fs * 0.06 * np.exp(-max(age, 0) / 0.1) if sung else 0)
-            od.text((x - (fw.getlength(w) - ww) / 2, y + dy), w, font=fw, fill=col, stroke_width=max(2, int(fs * 0.07)), stroke_fill=(10, 0, 20, int(200 * A_)))
-            if sung and age < 0.6: gd.text((x, y), w, font=f, fill=(190, 90, 255, int(220 * A_ * np.exp(-age / 0.35))))
-            x += ww + sp
-    glow = glow.filter(ImageFilter.GaussianBlur(fs * 0.25))
-    img = Image.alpha_composite(img.convert('RGBA'), glow); img = Image.alpha_composite(img, ov)
+# ---------------------------------------------------------------- the caption at the tap
+def caption(img, C, W, H):
+    if not C: return img
+    v = C['v']; age = v - C['t0']
+    if age < 0: return img
+    pop = float(spring(age / 0.22)); sc = 0.55 + 0.45 * pop
+    fs = W * 0.082 * sc; f = font('InterDisplay-ExtraBold.otf', fs)
+    words = ['The', 'End', 'Update']; ov = Image.new('RGBA', (W, H), (0, 0, 0, 0)); d = ImageDraw.Draw(ov)
+    sp = d.textlength(' ', font=f); ws = [d.textlength(w, font=f) for w in words]; tot = sum(ws) + sp * 2
+    x = (W - tot) / 2; y = H * 0.80 - fs / 2
+    for i, (w, ww) in enumerate(zip(words, ws)):
+        col = (255, 255, 255, 255) if i != 1 else (205, 150, 255, 255)
+        d.text((x, y), w, font=f, fill=col, stroke_width=max(3, int(fs * 0.09)), stroke_fill=(8, 0, 18, 255)); x += ww + sp
+    glow = ov.filter(ImageFilter.GaussianBlur(float(fs * 0.22))); ga = np.array(glow); ga[..., :3] = [150, 70, 255]; ga[..., 3] = (ga[..., 3] * 0.55).astype(np.uint8)
+    img = Image.alpha_composite(img.convert('RGBA'), Image.fromarray(ga)); img = Image.alpha_composite(img, ov)
     return img.convert('RGB')
+
+
+# ---------------------------------------------------------------- the title: blocky extruded letters (an original pixel face)
+GLYPH = {'T': ['#####', '..#..', '..#..', '..#..', '..#..', '..#..', '..#..'], 'H': ['#...#', '#...#', '#...#', '#####', '#...#', '#...#', '#...#'],
+         'E': ['#####', '#....', '#....', '####.', '#....', '#....', '#####'], 'N': ['#...#', '##..#', '#.#.#', '#..##', '#...#', '#...#', '#...#'],
+         'D': ['####.', '#...#', '#...#', '#...#', '#...#', '#...#', '####.'], 'U': ['#...#', '#...#', '#...#', '#...#', '#...#', '#...#', '.###.'],
+         'P': ['####.', '#...#', '#...#', '####.', '#....', '#....', '#....'], 'A': ['.###.', '#...#', '#...#', '#####', '#...#', '#...#', '#...#']}
+
+
+def word_img(text, b, top=(246, 232, 255), bot=(160, 96, 236), seed=0):
+    cells = []
+    for i, ch in enumerate(text):
+        for r_, row in enumerate(GLYPH[ch]):
+            for c_, q in enumerate(row):
+                if q == '#': cells.append((i * 6 + c_, r_))
+    cw = len(text) * 6 - 1; dep = int(b * 0.75); pad = int(b * 0.5)
+    Wd, Hd = int(cw * b) + dep + 2 * pad, int(7 * b) + dep + 2 * pad
+    im = Image.new('RGBA', (Wd, Hd), (0, 0, 0, 0)); d = ImageDraw.Draw(im); rng = np.random.default_rng(seed)
+    ol = max(2, int(b * 0.12))
+    for (cx, cy) in cells:                                   # the outline, around face and depth
+        x0, y0 = pad + cx * b, pad + cy * b; d.rectangle([x0 - ol, y0 - ol, x0 + b + ol + dep * 0.45, y0 + b + ol + dep], fill=(10, 3, 20, 255))
+    for k in range(dep, 0, -1):                              # the extrusion, down and a little right
+        t = k / dep; colr = (int(70 - 45 * t), int(30 - 22 * t), int(118 - 70 * t), 255)
+        for (cx, cy) in cells:
+            x0, y0 = pad + cx * b + k * 0.45, pad + cy * b + k; d.rectangle([x0, y0, x0 + b - 1, y0 + b - 1], fill=colr)
+    for (cx, cy) in cells:                                   # the faces: a gradient down the letter, each block bevelled
+        x0, y0 = pad + cx * b, pad + cy * b; t = (cy + 0.5) / 7; j = 1 + rng.uniform(-0.05, 0.05)
+        col = tuple(int(min(255, (top[i] * (1 - t) + bot[i] * t) * j)) for i in range(3)) + (255,)
+        d.rectangle([x0, y0, x0 + b - 1, y0 + b - 1], fill=col)
+        e = max(1, int(b * 0.12))
+        d.rectangle([x0, y0, x0 + b - 1, y0 + e - 1], fill=tuple(min(255, int(c * 1.12) + 10) for c in col[:3]) + (255,))
+        d.rectangle([x0, y0 + b - e, x0 + b - 1, y0 + b - 1], fill=tuple(int(c * 0.78) for c in col[:3]) + (255,))
+        d.rectangle([x0 + b - e, y0, x0 + b - 1, y0 + b - 1], fill=tuple(int(c * 0.86) for c in col[:3]) + (255,))
+    return im
+
+
+_TITLE = {}
+def title_img(W):
+    if W not in _TITLE:
+        a = word_img('THE', int(W * 0.016), seed=1); bimg = word_img('END', int(W * 0.040), seed=2); c = word_img('UPDATE', int(W * 0.0195), seed=3)
+        gap = int(W * 0.012); Wt = max(a.width, bimg.width, c.width); Ht = a.height + bimg.height + c.height + 2 * gap
+        T = Image.new('RGBA', (Wt, Ht), (0, 0, 0, 0)); y = 0
+        for im in (a, bimg, c): T.alpha_composite(im, ((Wt - im.width) // 2, y)); y += im.height + gap
+        g = T.filter(ImageFilter.GaussianBlur(float(W * 0.03))); ga = np.array(g); ga[..., :3] = [165, 80, 255]
+        _TITLE[W] = (T, Image.fromarray(ga))
+    return _TITLE[W]
+
+
+def title(img, P, W, H):
+    if not P: return img
+    v = P['v']; T, G = title_img(W)
+    age = v - P['t0']; sc = 1.0 + 0.16 * np.exp(-age / 0.10) + 0.035 * min(age / 4.0, 1.0)
+    gl = 0.55
+    for t in P['beats']:
+        d = v - t
+        if 0 <= d < 0.6: sc += 0.06 * np.exp(-d / 0.11); gl += 0.6 * np.exp(-d / 0.15)
+    a = min(1.0, age / 0.06)
+    jx = jy = 0
+    if v >= P['tape']:
+        k = (v - P['tape']) / (P['sil'] - P['tape']); a *= 1 - ease(k); sc *= 1 - 0.05 * k
+        jx = int(W * 0.01 * np.sin(v * 90) * k); jy = int(W * 0.006 * k * k * 10)
+    if a <= 0.01: return img
+    tw, th = int(T.width * sc), int(T.height * sc); Ti = T.resize((tw, th), Image.LANCZOS); Gi = G.resize((tw, th), Image.BILINEAR)
+    x = (W - tw) // 2 + jx; y = int(H * 0.47 - th / 2) + jy
+    base = img.convert('RGBA'); lay = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+    ga = np.array(Gi); ga[..., 3] = np.clip(ga[..., 3] * gl * a, 0, 255).astype(np.uint8); lay.alpha_composite(Image.fromarray(ga), (x, y))
+    base = Image.alpha_composite(base, lay)
+    Ta = np.array(Ti); Ta[..., 3] = (Ta[..., 3] * a).astype(np.uint8)
+    if v >= P['tape']:                                       # the tape stop tears the colour apart
+        k = (v - P['tape']) / (P['sil'] - P['tape']); off = int(W * 0.012 * k)
+        r_ = Ta.copy(); r_[..., 1:3] = 0; bl = Ta.copy(); bl[..., 0:2] = 0
+        l2 = Image.new('RGBA', (W, H), (0, 0, 0, 0)); l2.alpha_composite(Image.fromarray(r_), (x - off, y)); l2.alpha_composite(Image.fromarray(bl), (x + off, y))
+        base = Image.alpha_composite(base, l2)
+    l3 = Image.new('RGBA', (W, H), (0, 0, 0, 0)); l3.alpha_composite(Image.fromarray(Ta), (x, y))
+    return Image.alpha_composite(base, l3).convert('RGB')
 
 
 def render(ks, out_dir, w, h, label=False):
@@ -180,7 +241,7 @@ def render(ks, out_dir, w, h, label=False):
     pw = b = pg = None
     if need3d:
         from playwright.sync_api import sync_playwright
-        import end_view as V
+        import end2_view as V
         V.ensure_server(); pw = sync_playwright().start(); b, pg = V.open_page(pw)
     t0 = time.time()
     for i, k in enumerate(ks):
@@ -188,8 +249,9 @@ def render(ks, out_dir, w, h, label=False):
         if f['render']:
             r = dict(f['render']); r['w'] = w; r['h'] = h; im = V.shot(pg, r)
         elif f['phone']: im = phone(w, h, f['phone'])
-        else: im = notif(w, h, f['notif'])
-        im = lyric(im, f['lyric'], w, h)
+        elif f['notif']: im = notif(w, h, f['notif'])
+        else: im = Image.new('RGB', (w, h), (0, 0, 0))
+        im = caption(im, f.get('caption'), w, h); im = title(im, f.get('title'), w, h)
         if label: ImageDraw.Draw(im).text((6, 6), 'v %.2f' % (k / A.FPS), fill=(255, 255, 0))
         im.save(os.path.join(out_dir, 'f_%05d.jpg' % k), quality=95) if out_dir.endswith('frames') else im.save(os.path.join(out_dir, 'f_%05d.png' % k))
         if i % 60 == 0: print('frame %d (%d/%d) %.0fs' % (k, i, len(ks), time.time() - t0), flush=True)

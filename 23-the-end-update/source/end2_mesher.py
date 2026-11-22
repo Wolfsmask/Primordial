@@ -2,15 +2,17 @@
 gets blocky-game style ambient occlusion, quads split along the darker diagonal.  (From the bleedout-spot mesher.)
 Output groups are dicts of numpy arrays: pos (f32 xyz), nrm (i8), uv (u16 normalised), col (u8 rgb), idx (u32) and chunks."""
 import numpy as np
-import end_tex as TX
+import end2_tex as TX
 
 AIR = 0
 B = dict(end_stone=1, end_bricks=2, obsidian=3, purpur=4, purpur_pillar=5, bedrock=6, chorus_stem=7, chorus_flower=8,
          void_moss=9, bloom_leaves=10, bloom_log=11, void_crystal=12, end_rod=13, cracked_obsidian=14, gold_trim=15,
-         end_grass=16, shardstone=17)
-OPAQUE = {1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 14, 15, 17}
+         end_grass=16, shardstone=17, lit_window=18, banner=19, aether_crystal=20, glow_vine=21, glow_shroom=22,
+         rune_obsidian=23, purpur_tile=24, end_stone_smooth=25, chiseled_purpur=26, gold_block=27, void_glass=28)
+OPAQUE = {1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 14, 15, 17, 18, 19, 20, 23, 24, 25, 26, 27, 28}
 LEAVES = {10}
-PLANTS = {13, 16}
+PLANTS = {13, 16, 21, 22}
+CRYSTAL = {12, 20}
 PETALS = 99
 T = TX.IDX
 # top, side, bottom
@@ -18,7 +20,9 @@ TILES = {1: ('end_stone',) * 3, 2: ('end_bricks',) * 3, 3: ('obsidian',) * 3, 4:
          5: ('purpur_top', 'purpur_pillar', 'purpur_top'), 6: ('bedrock',) * 3, 7: ('chorus_stem',) * 3, 8: ('chorus_flower',) * 3,
          9: ('void_moss_top', 'void_moss_side', 'end_stone'), 10: ('bloom_leaves',) * 3, 11: ('bloom_log_top', 'bloom_log', 'bloom_log_top'),
          12: ('void_crystal',) * 3, 13: ('end_rod',) * 3, 14: ('cracked_obsidian',) * 3, 15: ('gold_trim',) * 3,
-         16: ('end_grass',) * 3, 17: ('shardstone',) * 3}
+         16: ('end_grass',) * 3, 17: ('shardstone_top', 'shardstone', 'shardstone'), 18: ('lit_window',) * 3, 19: ('banner',) * 3,
+         20: ('aether_crystal',) * 3, 21: ('glow_vine',) * 3, 22: ('glow_shroom',) * 3, 23: ('rune_obsidian',) * 3,
+         24: ('purpur_tile',) * 3, 25: ('end_stone_smooth',) * 3, 26: ('chiseled_purpur',) * 3, 27: ('gold_block',) * 3, 28: ('void_glass',) * 3}
 TILE_LUT = np.zeros((256, 3), np.int32)
 for b, ts in TILES.items():
     TILE_LUT[b] = [T[n] for n in ts]
@@ -91,7 +95,7 @@ def mesh_volume(vol, origin, scale=1.0, mode='textured', colors=None, chunk=64, 
     ox, oy, oz = origin
     opaque = np.isin(vol, list(OPAQUE)) if mode == 'textured' else (vol > 0)
     leaves = np.isin(vol, list(LEAVES)) if mode == 'textured' else np.zeros_like(opaque)
-    groups = {'opaque': Builder(), 'leaves': Builder(), 'plants': Builder()}
+    groups = {'opaque': Builder(), 'leaves': Builder(), 'plants': Builder(), 'crystal': Builder()}
     occl = opaque | leaves                                   # what darkens corners
     rng = np.random.default_rng(5)
     for n, o, U, V in DIRS:
@@ -141,7 +145,13 @@ def mesh_volume(vol, origin, scale=1.0, mode='textured', colors=None, chunk=64, 
                 jit = 1 + 0.07 * (rng.random(len(xs)) - 0.5)
                 col = ao[:, :, None] * (base * jit[:, None])[:, None, :] * 255
             keys = ((xs * scale + ox) // chunk).astype(np.int64) * 100000 + ((zs * scale + oz) // chunk).astype(np.int64)
-            groups[gname].add(keys, pos, np.broadcast_to(np.array(n, np.int8) * 127, (len(xs), 3)), uv, col, flip)
+            nn = np.broadcast_to(np.array(n, np.int8) * 127, (len(xs), 3))
+            if gname == 'opaque' and mode == 'textured':
+                cm = np.isin(blk, list(CRYSTAL))
+                groups['crystal'].add(keys[cm], pos[cm], nn[cm], uv[cm], col[cm], flip[cm])
+                groups['opaque'].add(keys[~cm], pos[~cm], nn[~cm], uv[~cm], col[~cm], flip[~cm])
+            else:
+                groups[gname].add(keys, pos, nn, uv, col, flip)
     if mode == 'textured':
         # crossed plants and flat petals
         for bset, kind in ((PLANTS, 'cross'), ({PETALS}, 'flat')):
@@ -149,8 +159,8 @@ def mesh_volume(vol, origin, scale=1.0, mode='textured', colors=None, chunk=64, 
             if len(xs) == 0:
                 continue
             blk = vol[xs, ys, zs]; tile = TILE_LUT[blk, 1]; tc, tr = tile % COLS, tile // COLS
-            B = np.stack([xs, ys, zs], 1).astype(np.float32) + np.array([ox, oy, oz], np.float32)
-            keys = ((xs + ox) // chunk).astype(np.int64) * 100000 + ((zs + oz) // chunk).astype(np.int64)
+            B = np.stack([xs, ys, zs], 1).astype(np.float32)
+            keys = ((xs * scale + ox) // chunk).astype(np.int64) * 100000 + ((zs * scale + oz) // chunk).astype(np.int64)
             e = 0.002
             uvq = np.stack([np.stack([(tc + e + (1 - 2 * e) * cu) / COLS, (tr + e + (1 - 2 * e) * cv) / ROWS], 1) for cu, cv in CORNERS], 1)
             up = np.broadcast_to(np.array([0, 127, 0], np.int8), (len(xs), 3))
@@ -158,6 +168,7 @@ def mesh_volume(vol, origin, scale=1.0, mode='textured', colors=None, chunk=64, 
             if kind == 'cross':
                 for a, b in (((0.15, 0.15), (0.85, 0.85)), ((0.15, 0.85), (0.85, 0.15))):
                     pos = np.stack([B + [a[0], 1, a[1]], B + [b[0], 1, b[1]], B + [b[0], 0, b[1]], B + [a[0], 0, a[1]]], 1)
+                    pos = pos * scale + np.array([ox, oy, oz], np.float32)
                     groups['plants'].add(keys, pos.astype(np.float32), up, uvq, col)
             else:
                 y = 0.04

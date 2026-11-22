@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>the end update v2</title>
+<style>html,body{margin:0;background:#000;overflow:hidden}</style>
+<script type="importmap">{"imports":{"three":"./node_modules/three/build/three.module.js","three/addons/":"./node_modules/three/examples/jsm/"}}</script>
+</head><body>
+<script type="module">
+// The End Update, v2 renderer.  A shader-pack style pipeline:
+//  PBR blocks (albedo / normal / roughness+metal / emission atlases, sky reflections, vertex AO), a warm key light from
+//  the black hole's accretion disk with soft shadows; the sky: a lensed black hole (a precomputed Schwarzschild map),
+//  a nebula and a galactic band baked into a cube, sharp stars; the Rift Gate's vortex; light falls; void sea.
+//  Post: volumetric mist with shadowed light shafts (half res), atmospheric perspective, screen-space sun shafts,
+//  camera motion blur, depth of field, bloom with lens dirt, anamorphic streaks, ACES, grade, grain.
+import * as THREE from 'three';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+const DEG = Math.PI / 180;
+const SC = await (await fetch('scene.json')).json();
+const BH = await (await fetch('bh.json')).json();
+const BHC = new THREE.Vector3(...BH.c), BHX = new THREE.Vector3(...BH.ex), BHY = new THREE.Vector3(...BH.ey);
+
+const renderer = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1);
+renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.NoToneMapping; renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(55, 9 / 16, 0.1, 12000);
+const U = { time: { value: 0 } };
+
+const NOISE = `
+float hash12(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
+float hash13(vec3 p3) { p3 = fract(p3 * 0.1031); p3 += dot(p3, p3.zyx + 31.32); return fract((p3.x + p3.y) * p3.z); }
+float vn3(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+  float a = mix(mix(hash13(i), hash13(i + vec3(1,0,0)), f.x), mix(hash13(i + vec3(0,1,0)), hash13(i + vec3(1,1,0)), f.x), f.y);
+  float b = mix(mix(hash13(i + vec3(0,0,1)), hash13(i + vec3(1,0,1)), f.x), mix(hash13(i + vec3(0,1,1)), hash13(i + vec3(1,1,1)), f.x), f.y);
+  return mix(a, b, f.z); }
+float fbm3(vec3 p) { float s = 0.0, a = 0.5; for (int i = 0; i < 6; i++) { s += a * vn3(p); p = p * 2.02 + 3.1; a *= 0.5; } return s / 0.984; }
+float hg(float c, float g) { float g2 = g * g; return (1.0 - g2) / (12.566 * pow(max(1.0 + g2 - 2.0 * g * c, 1e-4), 1.5)); }
+`;
+// ------------------------------------------------------------------ a tileable 3D noise texture (fbm), for the mist, the disk, the falls
+const NZ = 64;
+const noiseTex = (() => {
+  const d = new Uint8Array(NZ * NZ * NZ), acc = new Float32Array(NZ * NZ * NZ);
+  let amp = 0.5, tot = 0;
+  for (const per of [4, 8, 16, 32]) {
+    const L = new Float32Array(per * per * per); for (let i = 0; i < L.length; i++) L[i] = Math.random();
+    const g = (x, y, z) => L[((x % per) * per + (y % per)) * per + (z % per)];
+    const s = per / NZ;
+    for (let x = 0; x < NZ; x++) for (let y = 0; y < NZ; y++) for (let z = 0; z < NZ; z++) {
+      const fx = x * s, fy = y * s, fz = z * s; const ix = Math.floor(fx), iy = Math.floor(fy), iz = Math.floor(fz);
+      let u = fx - ix, v = fy - iy, w = fz - iz; u = u * u * (3 - 2 * u); v = v * v * (3 - 2 * v); w = w * w * (3 - 2 * w);
+      const a = g(ix, iy, iz) * (1 - u) + g(ix + 1, iy, iz) * u, b = g(ix, iy + 1, iz) * (1 - u) + g(ix + 1, iy + 1, iz) * u;
+      const c = g(ix, iy, iz + 1) * (1 - u) + g(ix + 1, iy, iz + 1) * u, e = g(ix, iy + 1, iz + 1) * (1 - u) + g(ix + 1, iy + 1, iz + 1) * u;
+      acc[(z * NZ + y) * NZ + x] += amp * ((a * (1 - v) + b * v) * (1 - w) + (c * (1 - v) + e * v) * w);
+    }
+    tot += amp; amp *= 0.5;
+  }
+  for (let i = 0; i < d.length; i++) d[i] = Math.max(0, Math.min(255, Math.round(((acc[i] / tot) - 0.5) * 1.9 * 255 + 128)));
+  const t = new THREE.Data3DTexture(d, NZ, NZ, NZ); t.format = THREE.RedFormat; t.type = THREE.UnsignedByteType;
+  t.minFilter = t.magFilter = THREE.LinearFilter; t.wrapS = t.wrapT = t.wrapR = THREE.RepeatWrapping; t.unpackAlignment = 1; t.needsUpdate = true; return t;
+})();
+const N3 = `precision highp sampler3D; uniform sampler3D tNoise; float n3(vec3 p) { return texture(tNoise, p).r; }
+float f3(vec3 p) { return n3(p) * 0.6 + n3(p * 2.7 + 0.31) * 0.4; }
+`;
+
+// ------------------------------------------------------------------ the sky.  1: bake the nebula and galactic band into a cube
+const BG_GLSL = NOISE + `
+vec3 bgSky(vec3 d) {
+  vec3 col = vec3(0.0030, 0.0022, 0.0080);
+  vec3 nG = normalize(vec3(0.42, 0.78, -0.46)); float b = dot(d, nG); float band = exp(-b * b / 0.045);
+  float n1 = fbm3(d * 3.0 + fbm3(d * 6.0) * 0.7), n2 = fbm3(d * 11.0 + 3.1);
+  float dust = smoothstep(0.42, 0.72, fbm3(d * 5.5 + 11.0 + fbm3(d * 12.0) * 0.3));
+  vec3 gal = mix(vec3(0.16, 0.10, 0.30), vec3(0.50, 0.42, 0.62), n2) * band * (0.25 + 1.1 * n1 * n1) * (1.0 - 0.9 * dust * smoothstep(0.1, 0.8, band));
+  col += gal * 0.30 + vec3(0.55, 0.5, 0.75) * pow(n2, 6.0) * band * 0.25;
+  float w = fbm3(d * 1.6 + vec3(4.0, 1.0, 7.0) + fbm3(d * 3.5) * 0.9);
+  float m = smoothstep(0.48, 0.86, w), t = smoothstep(0.55, 0.9, fbm3(d * 2.3 + vec3(9.0) + fbm3(d * 5.0 + 2.0) * 0.6));
+  col += vec3(0.34, 0.05, 0.40) * m * m * 0.32 + vec3(0.02, 0.24, 0.30) * t * t * 0.26 + vec3(0.8, 0.3, 0.9) * pow(m, 6.0) * 0.12;
+  col += vec3(0.65, 0.6, 0.85) * pow(hash13(floor(d * 1400.0)), 90.0) * 0.5 * (0.4 + band);
+  col += vec3(0.09, 0.03, 0.16) * exp(-abs(d.y + 0.08) * 6.0) * 0.30;
+  col *= mix(1.0, 0.35, smoothstep(0.0, -0.7, d.y));
+  return col;
+}`;
+const bgCube = new THREE.WebGLCubeRenderTarget(1024, { type: THREE.HalfFloatType, generateMipmaps: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter });
+{
+  const s = new THREE.Scene();
+  s.add(new THREE.Mesh(new THREE.SphereGeometry(100, 64, 32), new THREE.ShaderMaterial({ side: THREE.BackSide, depthWrite: false,
+    vertexShader: `varying vec3 vDir; void main(){ vDir = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: BG_GLSL + `varying vec3 vDir; void main(){ gl_FragColor = vec4(bgSky(normalize(vDir)), 1.0); }` })));
+  new THREE.CubeCamera(1, 1000, bgCube).update(renderer, s);
+}
+// 2: the black hole: lensing map (escape direction, disk crossings), shaded every frame
+async function halfTex(url) { const b = await (await fetch(url)).arrayBuffer(); const t = new THREE.DataTexture(new Uint16Array(b), BH.N, BH.N, THREE.RGBAFormat, THREE.HalfFloatType);
+  t.minFilter = t.magFilter = THREE.LinearFilter; t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping; t.needsUpdate = true; return t; }
+const BHU = { tBhA: { value: await halfTex('bh_a.bin') }, tBhB: { value: await halfTex('bh_b.bin') }, tBhC: { value: await halfTex('bh_c.bin') },
+  tBg: { value: bgCube.texture }, bhC: { value: BHC }, bhX: { value: BHX }, bhY: { value: BHY }, bhF: { value: BH.F }, bhD: { value: BH.D },
+  uTime: U.time, uBhK: { value: 1.0 }, uStarK: { value: 1.0 }, tNoise: { value: noiseTex } };
+const SKY_GLSL = NOISE + N3 + `
+uniform sampler2D tBhA; uniform sampler2D tBhB; uniform sampler2D tBhC; uniform samplerCube tBg;
+uniform vec3 bhC; uniform vec3 bhX; uniform vec3 bhY; uniform float bhF; uniform float bhD; uniform float uTime; uniform float uBhK; uniform float uStarK;
+const float RIN = ${BH.rin.toFixed(3)}, ROUT = ${BH.rout.toFixed(3)};
+vec3 stars(vec3 d) {
+  vec3 s = vec3(0.0);
+  for (int l = 0; l < 2; l++) {
+    float sc = l == 0 ? 240.0 : 520.0; vec3 p = d * sc; vec3 c = floor(p); float h = hash13(c + float(l) * 31.0); float thr = l == 0 ? 0.982 : 0.990;
+    if (h > thr) { vec3 f = fract(p) - 0.5 - (vec3(hash13(c + 1.3), hash13(c + 2.7), hash13(c + 5.1)) - 0.5) * 0.5;
+      float w = exp(-dot(f, f) * (l == 0 ? 34.0 : 52.0)); float br = pow((h - thr) / (1.0 - thr), 2.5) * (l == 0 ? 16.0 : 5.0);
+      float tw = 0.8 + 0.2 * sin(uTime * (3.0 + 7.0 * fract(h * 37.0)) + h * 60.0);
+      s += mix(vec3(0.70, 0.76, 1.0), vec3(1.0, 0.78, 0.92), fract(h * 91.0)) * w * br * tw; }
+  }
+  return s * uStarK;
+}
+vec4 disk(vec4 hit) {                         // hit = (u, v, doppler*gravity, valid) -> (emission, opacity)
+  if (hit.w < 0.02) return vec4(0.0);
+  float r = length(hit.xy); if (r < RIN * 0.7 || r > ROUT * 1.15) return vec4(0.0);
+  float ph = atan(hit.y, hit.x); float om = 0.55 * pow(r / RIN, -1.5); float p2 = ph + om * uTime;
+  vec3 q = vec3(cos(p2) * 0.9, sin(p2) * 0.9, log(r) * 2.4);
+  float n = n3(q * 0.35 + 0.5) * 0.55 + n3(q * vec3(0.9, 0.9, 1.6) + 0.2) * 0.45;
+  float streak = n3(vec3(cos(p2) * 0.3, sin(p2) * 0.3, log(r) * 9.0) + 0.7);
+  float prof = pow(r / RIN, -2.1) * smoothstep(RIN * 0.92, RIN * 1.22, r) * smoothstep(ROUT, ROUT * 0.55, r);
+  float I = prof * (0.18 + 1.5 * pow(n, 2.2) + 0.6 * pow(streak, 3.0));
+  float g = clamp(hit.z, 0.25, 1.9); I *= pow(g, 3.2);
+  float t = clamp((r - RIN) / (ROUT - RIN), 0.0, 1.0);
+  vec3 col = mix(vec3(1.0, 0.95, 0.92), vec3(1.0, 0.62, 0.30), smoothstep(0.0, 0.30, t));
+  col = mix(col, vec3(0.80, 0.22, 0.70), smoothstep(0.30, 0.95, t));
+  col = mix(col, vec3(0.85, 0.90, 1.0), clamp(g - 1.0, 0.0, 0.8)); col = mix(col, vec3(0.9, 0.25, 0.3), clamp(0.8 - g, 0.0, 0.5));
+  return vec4(col * I * 9.0 * uBhK, clamp(I * 2.2, 0.0, 1.0) * hit.w);
+}
+vec3 skyCol(vec3 rd) {
+  float cz = dot(rd, bhC); vec3 esc = rd; float cap = 0.0; vec4 A = vec4(0.0), B = vec4(0.0); bool inMap = false;
+  if (cz > 0.2) { vec2 g = vec2(dot(rd, bhX), dot(rd, bhY)) / cz;
+    if (abs(g.x) < bhF && abs(g.y) < bhF) { inMap = true; vec2 uv = g / bhF * 0.5 + 0.5;
+      A = texture2D(tBhA, uv); B = texture2D(tBhB, uv); vec4 C = texture2D(tBhC, uv); esc = normalize(C.xyz + 1e-5); cap = C.w;
+      float edge = smoothstep(0.0, 0.06, min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y)));      // fade into the analytic lens
+      if (edge < 1.0) { float th = acos(clamp(cz, -1.0, 1.0)); float al = 2.0 / max(bhD * sin(th), 1e-3);
+        vec3 ax = normalize(cross(rd, bhC) + 1e-6); vec3 e2 = normalize(rd * cos(al) + cross(ax, rd) * sin(al)); esc = normalize(mix(e2, esc, edge)); } } }
+  if (!inMap && cz > -0.999) { float th = acos(clamp(cz, -1.0, 1.0)); float al = 2.0 / max(bhD * sin(th), 1e-3);
+    vec3 ax = normalize(cross(rd, bhC) + 1e-6); esc = normalize(rd * cos(al) + cross(ax, rd) * sin(al)); }
+  vec3 bg = (textureCube(tBg, esc).rgb + stars(esc)) * (1.0 - cap);
+  // a thin photon-ring glint at the shadow's edge
+  float ang = acos(clamp(cz, -1.0, 1.0)); float rs = 2.598 / bhD;
+  vec4 d1 = disk(A), d2 = disk(B);
+  vec3 col = d1.rgb + (1.0 - d1.a) * (d2.rgb + (1.0 - d2.a) * bg);
+  col += vec3(0.55, 0.30, 0.65) * exp(-ang / 0.25) * 0.05 * uBhK * (1.0 - cap);               // a faint halo of lit gas
+  return col;
+}`;
+const skyMat = new THREE.ShaderMaterial({ side: THREE.BackSide, depthWrite: false, depthTest: false, uniforms: BHU,
+  vertexShader: `varying vec3 vDir; void main(){ vDir = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: SKY_GLSL + `varying vec3 vDir; void main(){ gl_FragColor = vec4(skyCol(normalize(vDir)), 1.0); }` });
+const sky = new THREE.Mesh(new THREE.SphereGeometry(6000, 64, 32), skyMat); sky.renderOrder = -10; sky.frustumCulled = false; scene.add(sky);
+// the environment for reflections: the sky (prefiltered)
+let envTex;
+{ const s = new THREE.Scene(); const m = new THREE.Mesh(new THREE.SphereGeometry(100, 64, 32), skyMat.clone()); m.material.uniforms = BHU; m.material.depthTest = true; s.add(m);
+  const pm = new THREE.PMREMGenerator(renderer); envTex = pm.fromScene(s, 0, 1, 1000).texture; pm.dispose(); }
+
+// ------------------------------------------------------------------ the void sea, far below
+const seaMat = new THREE.ShaderMaterial({ uniforms: Object.assign({}, BHU),
+  vertexShader: `varying vec3 vW; void main(){ vec4 w = modelMatrix * vec4(position, 1.0); vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }`,
+  fragmentShader: NOISE + N3 + `uniform samplerCube tBg; uniform float uTime; varying vec3 vW;
+  void main(){
+    vec3 V = normalize(cameraPosition - vW); vec2 p = vW.xz * 0.004;
+    float w1 = n3(vec3(p, uTime * 0.01)), w2 = n3(vec3(p * 2.3 + 0.3, uTime * 0.017 + 0.5));
+    float fil = pow(1.0 - abs(w1 - w2) * 2.0, 10.0);
+    vec3 n = normalize(vec3((w1 - 0.5) * 0.3, 1.0, (w2 - 0.5) * 0.3));
+    vec3 r = reflect(-V, n); float fr = 0.04 + 0.96 * pow(1.0 - max(dot(n, V), 0.0), 5.0);
+    vec3 col = vec3(0.006, 0.002, 0.014) + vec3(0.50, 0.14, 0.95) * fil * 0.45;
+    col += textureCube(tBg, vec3(r.x, abs(r.y), r.z)).rgb * fr * 1.5;
+    gl_FragColor = vec4(col, 1.0);
+  }` });
+const sea = new THREE.Mesh(new THREE.PlaneGeometry(40000, 40000), seaMat); sea.rotation.x = -Math.PI / 2; sea.position.y = -420; scene.add(sea);
+
+// ------------------------------------------------------------------ the world: PBR blocks
+async function ltex(src, srgb) { const im = new Image(); im.src = src; await im.decode(); const t = new THREE.Texture(im);
+  t.magFilter = THREE.NearestFilter; t.minFilter = THREE.NearestMipmapLinearFilter; t.generateMipmaps = true; t.anisotropy = 8;
+  t.flipY = false; if (srgb) t.colorSpace = THREE.SRGBColorSpace; t.needsUpdate = true; return t; }
+const atlas = await ltex('atlas.png', true), atlasEm = await ltex('atlas_em.png', true), atlasN = await ltex('atlas_n.png', false), atlasS = await ltex('atlas_s.png', false);
+const EMK = { value: 1.0 };
+function worldMat(kind) {
+  const m = new THREE.MeshStandardMaterial({ map: atlas, normalMap: atlasN, normalScale: new THREE.Vector2(1, -1), roughnessMap: atlasS, metalnessMap: atlasS,
+    roughness: 1, metalness: 1, emissiveMap: atlasEm, emissive: new THREE.Color(1, 1, 1), emissiveIntensity: 2.6, vertexColors: true, envMap: envTex, envMapIntensity: 0.55 });
+  if (kind !== 'opaque') { m.alphaTest = 0.5; m.side = THREE.DoubleSide; }
+  m.customProgramCacheKey = () => 'world-' + kind;
+  m.onBeforeCompile = (sh) => {
+    sh.uniforms.uTime = U.time; sh.uniforms.uEmK = EMK;
+    sh.vertexShader = 'uniform float uTime; varying vec3 vWP; varying vec3 vWN;\n' + sh.vertexShader
+      .replace('#include <worldpos_vertex>', '#include <worldpos_vertex>\n vWP = (modelMatrix * vec4(transformed, 1.0)).xyz; vWN = normalize(mat3(modelMatrix) * objectNormal);')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\n' + (kind === 'opaque' ? '' :
+      `{ vec4 w0 = modelMatrix * vec4(position, 1.0); float sw = sin(uTime * 1.3 + w0.x * 0.31 + w0.z * 0.23) * 0.07 + sin(uTime * 2.3 + w0.y * 0.6 + w0.x * 0.1) * 0.035;
+         transformed.x += sw; transformed.z += sw * 0.6; }`));
+    sh.fragmentShader = 'uniform float uEmK; varying vec3 vWP; varying vec3 vWN;\nfloat bh13(vec3 p3) { p3 = fract(p3 * 0.1031); p3 += dot(p3, p3.zyx + 31.32); return fract((p3.x + p3.y) * p3.z); }\n' + sh.fragmentShader
+      .replace('#include <color_fragment>', '#if defined( USE_COLOR )\n diffuseColor.rgb *= mix(1.0, vColor.r, 0.6);\n#endif\n float bh = bh13(floor(vWP - vWN * 0.02) + 0.5); diffuseColor.rgb *= 0.92 + 0.16 * bh;')
+      .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\n totalEmissiveRadiance *= uEmK;' + (kind === 'leaves' ? ' totalEmissiveRadiance *= step(0.92, bh) * (1.0 + 1.6 * fract(bh * 37.0));' : ''))
+      .replace('#include <aomap_fragment>', '{ float ao = vColor.r; reflectedLight.indirectDiffuse *= ao; reflectedLight.indirectSpecular *= ao * ao; }');
+  };
+  return m;
+}
+// crystals: glassy, reflective, lit from inside (the glow drifts through them), bright at the grazing edges
+const crystalMat = new THREE.MeshStandardMaterial({ map: atlas, roughness: 0.05, metalness: 0.0, emissiveMap: atlasEm, emissive: new THREE.Color(1, 1, 1), emissiveIntensity: 2.4,
+  vertexColors: true, envMap: envTex, envMapIntensity: 1.6 });
+crystalMat.customProgramCacheKey = () => 'crystal';
+crystalMat.onBeforeCompile = (sh) => {
+  sh.uniforms.uTime = U.time; sh.uniforms.uEmK = EMK; sh.uniforms.tNoise = { value: noiseTex };
+  sh.vertexShader = 'varying vec3 vWP;\n' + sh.vertexShader.replace('#include <worldpos_vertex>', '#include <worldpos_vertex>\n vWP = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+  sh.fragmentShader = 'uniform float uEmK; uniform float uTime; varying vec3 vWP; precision highp sampler3D; uniform sampler3D tNoise;\n' + sh.fragmentShader
+    .replace('#include <color_fragment>', '#if defined( USE_COLOR )\n diffuseColor.rgb *= mix(1.0, vColor.r, 0.4);\n#endif')
+    .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+      { float fr = pow(1.0 - clamp(dot(normal, normalize(vViewPosition)), 0.0, 1.0), 3.0);
+        float g = texture(tNoise, vWP * 0.022 + vec3(0.0, uTime * 0.012, 0.0)).r; float g2 = texture(tNoise, vWP * 0.07 - vec3(uTime * 0.02)).r;
+        totalEmissiveRadiance *= (0.12 + 2.2 * g * g * g + 0.6 * g2 * g2) * uEmK; totalEmissiveRadiance += diffuseColor.rgb * fr * 2.8 * uEmK; }`);
+};
+const M = { opaque: worldMat('opaque'), leaves: worldMat('leaves'), plants: worldMat('plants'), crystal: crystalMat };
+const meta = await (await fetch('meta.json')).json();
+for (const [g, info] of Object.entries(meta.groups)) {
+  const kind = g.split('_').pop(); if (!M[kind]) continue;
+  const far = g.startsWith('far') || g.startsWith('colossus');
+  const buf = await (await fetch(info.file)).arrayBuffer(); const P = info.parts;
+  const pos = new Float32Array(buf, P.pos[0], P.pos[1]), idx = new Uint32Array(buf, P.idx[0], P.idx[1]);
+  const uv = new Uint16Array(buf, P.uv[0], P.uv[1]), nrm = new Int8Array(buf, P.nrm[0], P.nrm[1]), col = new Uint8Array(buf, P.col[0], P.col[1]);
+  for (const [ck, v0, nv, i0, ni] of info.chunks) {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos.subarray(v0 * 3, (v0 + nv) * 3), 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(nrm.subarray(v0 * 3, (v0 + nv) * 3), 3, true));
+    geo.setAttribute('uv', new THREE.BufferAttribute(uv.subarray(v0 * 2, (v0 + nv) * 2), 2, true));
+    geo.setAttribute('color', new THREE.BufferAttribute(col.subarray(v0 * 3, (v0 + nv) * 3), 3, true));
+    geo.setIndex(new THREE.BufferAttribute(idx.subarray(i0, i0 + ni), 1)); geo.computeBoundingSphere();
+    const mesh = new THREE.Mesh(geo, M[kind]); mesh.castShadow = !far; mesh.receiveShadow = !far; scene.add(mesh);
+  }
+}
+// light: the accretion disk's warm glare (shadows), the void's violet bounce, and nearby glowing things
+const KEY = new THREE.Color(1.0, 0.84, 0.70);
+const hemi = new THREE.HemisphereLight(new THREE.Color(0.30, 0.24, 0.55), new THREE.Color(0.10, 0.04, 0.16), 0.55); scene.add(hemi);
+const sun = new THREE.DirectionalLight(KEY, 3.0); sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048); sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.05; scene.add(sun); scene.add(sun.target);
+const fill = new THREE.DirectionalLight(new THREE.Color(0.42, 0.36, 0.95), 0.6); scene.add(fill); scene.add(fill.target);
+const NPL = 6;
+const PL = [...Array(NPL)].map(() => { const l = new THREE.PointLight(0xff60ff, 0, 60, 2); scene.add(l); return l; });
+
+// ------------------------------------------------------------------ shared bits: a soft dot
+const soft = (() => { const c = document.createElement('canvas'); c.width = c.height = 64; const g = c.getContext('2d'); const gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.25, 'rgba(255,255,255,0.5)'); gr.addColorStop(0.6, 'rgba(255,255,255,0.12)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, 64, 64); return new THREE.CanvasTexture(c); })();
+const sprite = (pos, scale, col, op = 1) => { const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: soft, color: col, transparent: true, opacity: op, depthWrite: false, blending: THREE.AdditiveBlending }));
+  s.position.set(...pos); s.scale.setScalar(scale); scene.add(s); return s; };
+
+// ------------------------------------------------------------------ the Rift: the vortex inside the gate
+const GATE = SC.gate; const GC = new THREE.Vector3(...GATE.c);
+const vortexMat = new THREE.ShaderMaterial({ side: THREE.DoubleSide, uniforms: { uTime: U.time, uI: { value: 1.0 }, uSpin: { value: 1.0 }, tNoise: { value: noiseTex } },
+  vertexShader: `varying vec3 vL; varying vec3 vCam; void main(){ vL = position; vCam = (inverse(modelMatrix) * vec4(cameraPosition, 1.0)).xyz;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: NOISE + N3 + `uniform float uTime; uniform float uI; uniform float uSpin; varying vec3 vL; varying vec3 vCam;
+  void main(){
+    float R = ${GATE.rin.toFixed(2)}; vec2 p0 = vL.xy / R; float r0 = length(p0); if (r0 > 1.0) discard;
+    vec3 rd = normalize(vL - vCam); float sg = vCam.z > 0.0 ? 1.0 : -1.0;
+    vec3 col = vec3(0.0); float tt = uTime * uSpin;
+    for (int k = 0; k < 6; k++) {
+      float dk = 0.10 + float(k) * 0.32;                               // layers further in
+      vec2 q = p0 + rd.xy / max(abs(rd.z), 0.12) * dk / R * R * 0.06 * float(k + 1);
+      float r = length(q); float th = atan(q.y, q.x);
+      float sp = th * 3.0 + log(r + 0.02) * 4.2 - tt * (1.2 + 0.25 * float(k)) * (k % 2 == 0 ? 1.0 : 0.8);
+      float arms = pow(0.5 + 0.5 * sin(sp), 3.0);
+      float nz = n3(vec3(cos(th) * 0.4 + r * 0.7, sin(th) * 0.4 - tt * 0.02, float(k) * 0.17 + r * 0.3));
+      float a = arms * (0.4 + 1.2 * nz) * smoothstep(1.05, 0.25, r) * (0.55 + 0.45 * r);
+      vec3 c = mix(vec3(0.55, 0.12, 1.0), vec3(0.10, 0.85, 0.95), smoothstep(0.2, 0.9, nz) * 0.6 + float(k) * 0.05);
+      col += c * a * (1.2 - float(k) * 0.15) * (0.35 + 0.65 * smoothstep(0.0, 0.5, r));
+      // stars in the deep
+      vec2 g = q * (30.0 + float(k) * 12.0); vec2 gi = floor(g); float h = hash12(gi + float(k) * 17.0);
+      if (h > 0.95) { vec2 f = fract(g) - 0.5; col += vec3(0.9, 0.85, 1.0) * exp(-dot(f, f) * 30.0) * 3.0 * smoothstep(1.0, 0.3, r); }
+    }
+    float core = exp(-r0 * 9.0); col = col * 0.55 * (1.0 - core * 0.6) + vec3(1.0, 0.85, 1.0) * core * 2.6 + vec3(0.5, 0.15, 1.0) * exp(-r0 * 3.0) * 0.5;
+    col += vec3(0.85, 0.45, 1.0) * smoothstep(0.86, 1.0, r0) * (1.4 + 0.8 * sin(atan(p0.y, p0.x) * 9.0 + tt * 4.0));
+    col *= 0.9 + 0.2 * n3(vec3(p0 * 2.0, tt * 0.1));
+    gl_FragColor = vec4(col * uI, 1.0);
+  }` });
+const vortex = new THREE.Mesh(new THREE.CircleGeometry(GATE.rin + 0.3, 128), vortexMat); vortex.position.copy(GC); scene.add(vortex);
+// particles drawn in: spiralling into the rift from both faces
+const VPN = 2400; const vpG = new THREE.BufferGeometry(); const vpS = new Float32Array(VPN * 3);
+for (let i = 0; i < VPN; i++) { vpS[i * 3] = Math.random(); vpS[i * 3 + 1] = Math.random(); vpS[i * 3 + 2] = Math.random(); }
+vpG.setAttribute('position', new THREE.BufferAttribute(new Float32Array(VPN * 3), 3)); vpG.setAttribute('aS', new THREE.BufferAttribute(vpS, 3));
+const vpMat = new THREE.ShaderMaterial({ transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, uniforms: { uTime: U.time, uI: { value: 1.0 }, uTex: { value: soft }, uC: { value: GC } },
+  vertexShader: `attribute vec3 aS; uniform float uTime; uniform float uI; uniform vec3 uC; varying float vA; varying vec3 vCol;
+    void main(){ float t = fract(uTime * (0.10 + 0.08 * aS.y) + aS.x); float r = mix(46.0, 1.0, pow(t, 0.7)); float th = aS.z * 6.2832 + t * 7.0;
+      float side = aS.y > 0.5 ? 1.0 : -1.0; vec3 p = uC + vec3(cos(th) * r, sin(th) * r, side * (1.0 - t) * 18.0 * (0.3 + aS.x));
+      vec4 mv = modelViewMatrix * vec4(p, 1.0); gl_Position = projectionMatrix * mv;
+      gl_PointSize = (0.15 + 0.3 * aS.x) * 1400.0 / max(-mv.z, 1.0); vA = uI * 0.6 * smoothstep(0.0, 0.15, t) * smoothstep(1.0, 0.85, t);
+      vCol = mix(vec3(1.4, 0.5, 2.2), vec3(0.5, 1.8, 2.0), step(0.7, aS.z)); }`,
+  fragmentShader: `uniform sampler2D uTex; varying float vA; varying vec3 vCol; void main(){ gl_FragColor = vec4(vCol * texture2D(uTex, gl_PointCoord).a * vA, 1.0); }` });
+const vparts = new THREE.Points(vpG, vpMat); vparts.frustumCulled = false; scene.add(vparts);
+
+// ------------------------------------------------------------------ end crystals: a glowing core in two turning glass frames
+function frameGeo(s, t) { const gs = []; for (const ax of [0, 1, 2]) for (const a of [-1, 1]) for (const b of [-1, 1]) {
+  const g = new THREE.BoxGeometry(ax === 0 ? s + t : t, ax === 1 ? s + t : t, ax === 2 ? s + t : t);
+  const o = [0, 0, 0]; const oth = [0, 1, 2].filter(k => k !== ax); o[oth[0]] = a * s / 2; o[oth[1]] = b * s / 2; g.translate(...o); gs.push(g); } return mergeGeometries(gs); }
+const frameMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(0.9, 0.8, 1.0), emissive: new THREE.Color(1.6, 0.55, 2.0), emissiveIntensity: 1.0, roughness: 0.2, metalness: 0.3, envMap: envTex });
+const glassMat = new THREE.ShaderMaterial({ transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+  vertexShader: `varying vec3 vN; varying vec3 vV; void main(){ vN = normalize(normalMatrix * normal); vec4 mv = modelViewMatrix * vec4(position, 1.0); vV = normalize(-mv.xyz); gl_Position = projectionMatrix * mv; }`,
+  fragmentShader: `varying vec3 vN; varying vec3 vV; void main(){ float f = 1.0 - abs(dot(vN, vV)); gl_FragColor = vec4(vec3(0.5, 0.2, 0.8) * (0.15 + 1.2 * pow(f, 3.0)), 1.0); }` });
+const coreMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(9.0, 3.0, 8.0) });
+const fA = frameGeo(1.9, 0.14), fB = frameGeo(1.35, 0.12);
+const CRY = SC.crystals.map((c, i) => {
+  const g = new THREE.Group(); g.position.set(...c);
+  const a = new THREE.Mesh(fA, frameMat), b = new THREE.Mesh(fB, frameMat), ga = new THREE.Mesh(new THREE.BoxGeometry(1.9, 1.9, 1.9), glassMat), k = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.62, 0.62), coreMat);
+  a.add(ga); g.add(a); g.add(b); g.add(k);
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: soft, color: new THREE.Color(1.5, 0.5, 1.6), transparent: true, depthWrite: false, blending: THREE.AdditiveBlending })); s.scale.setScalar(7); g.add(s);
+  scene.add(g); return { g, a, b, k, base: c, ph: i * 1.7 };
+});
+const beamMat = () => new THREE.ShaderMaterial({ uniforms: { uI: { value: 1 }, uTime: U.time, uCol: { value: new THREE.Color(1.0, 0.45, 1.0) } }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+  vertexShader: `varying vec2 vU; varying vec3 vN; varying vec3 vV; void main(){ vU = uv; vN = normalize(normalMatrix * normal); vec4 mv = modelViewMatrix * vec4(position, 1.0); vV = normalize(-mv.xyz); gl_Position = projectionMatrix * mv; }`,
+  fragmentShader: `uniform float uI; uniform float uTime; uniform vec3 uCol; varying vec2 vU; varying vec3 vN; varying vec3 vV;
+    void main(){ float f = abs(dot(vN, vV)); float core = pow(f, 4.0); float flow = 0.7 + 0.3 * sin(vU.y * 80.0 - uTime * 30.0);
+      vec3 c = mix(uCol, vec3(1.6, 1.5, 1.7), core) * (0.3 + 3.2 * core) * flow; gl_FragColor = vec4(c * uI, 1.0); }` });
+const BEAMS = [...Array(16)].map(() => { const m = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 1, 16, 1, true), beamMat()); m.visible = false; scene.add(m); return m; });
+function beamFx(list) {
+  BEAMS.forEach((m, i) => { const b = list[i]; m.visible = !!b; if (!b) return;
+    const A = new THREE.Vector3(b[0], b[1], b[2]), Bv = new THREE.Vector3(b[3], b[4], b[5]); const L = A.distanceTo(Bv);
+    m.position.copy(A).add(Bv).multiplyScalar(0.5); m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), Bv.clone().sub(A).normalize());
+    m.scale.set(b[6], L, b[6]); m.material.uniforms.uI.value = b[7]; if (b.length > 10) m.material.uniforms.uCol.value.setRGB(b[8], b[9], b[10]); });
+}
+
+// ------------------------------------------------------------------ light falls, the glowing pool and its channel
+const fallMat = (col) => new THREE.ShaderMaterial({ transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+  uniforms: { uTime: U.time, uCol: { value: col }, tNoise: { value: noiseTex }, uK: { value: 1 } },
+  vertexShader: `varying vec2 vU; void main(){ vU = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: N3 + `uniform float uTime; uniform vec3 uCol; uniform float uK; varying vec2 vU;
+  void main(){ float u = vU.x, d = vU.y;
+    float edge = smoothstep(0.0, 0.22, u) * smoothstep(1.0, 0.78, u);
+    float a = n3(vec3(u * 1.3, d * 0.010 - uTime * 0.20, 0.1)), b = n3(vec3(u * 3.1 + 0.4, d * 0.026 - uTime * 0.42, 0.6));
+    float st = smoothstep(0.30, 0.85, a * 0.55 + b * 0.55);
+    float I = (0.6 + 4.0 * st * st) * edge * exp(-d / 150.0) * (1.0 + 2.5 * exp(-d / 3.0)) * smoothstep(0.0, 0.6, d + 0.6);
+    gl_FragColor = vec4(uCol * I * uK, 1.0); }` });
+for (const lf of SC.lightfalls) {
+  const [x, y, z, ox, oz, w] = lf; const segs = 90; const pos = [], uv = [], idx = [];
+  for (let i = 0; i <= segs; i++) { const d = 260 * Math.pow(i / segs, 1.7); const t = Math.sqrt(2 * d / 26); const hx = 4.2 * t;
+    const ww = w * (1 + d / 55); const cx = x + ox * hx, cz = z + oz * hx, cy = y - d;
+    for (const s of [-1, 1]) { pos.push(cx - oz * s * ww / 2, cy, cz + ox * s * ww / 2); uv.push((s + 1) / 2, d); } }
+  for (let i = 0; i < segs; i++) { const a = i * 2; idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2)); g.setIndex(idx);
+  const teal = lf === SC.lightfalls[SC.lightfalls.length - 1];
+  scene.add(new THREE.Mesh(g, fallMat(teal ? new THREE.Color(0.5, 2.2, 2.4) : new THREE.Color(1.5, 0.6, 2.4))));
+  sprite([x + ox * 1.5, y + 0.6, z + oz * 1.5], w * 2.2, teal ? new THREE.Color(0.3, 1.0, 1.1) : new THREE.Color(0.9, 0.4, 1.2), 0.5);
+}
+const liquidMat = new THREE.ShaderMaterial({ uniforms: { uTime: U.time, tNoise: { value: noiseTex }, uFlow: { value: new THREE.Vector2(0, 0) } },
+  vertexShader: `varying vec3 vW; void main(){ vec4 w = modelMatrix * vec4(position, 1.0); vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }`,
+  fragmentShader: N3 + `uniform float uTime; uniform vec2 uFlow; varying vec3 vW;
+  void main(){ vec2 p = vW.xz * 0.12 - uFlow * uTime; float a = n3(vec3(p * 0.4, uTime * 0.05)), b = n3(vec3(p * 0.9 + 0.3, uTime * 0.08 + 0.4));
+    float c = pow(1.0 - abs(a - b) * 2.0, 6.0); gl_FragColor = vec4(vec3(0.25, 1.4, 1.5) * (0.35 + 1.6 * c), 1.0); }` });
+for (const p of SC.pools) { const m = new THREE.Mesh(new THREE.CircleGeometry(p[3], 48), liquidMat); m.rotation.x = -Math.PI / 2; m.position.set(p[0], p[1], p[2]); scene.add(m); }
+for (const c of SC.channels) { const [x0, z0, x1, z1, y, w] = c; const L = Math.hypot(x1 - x0, z1 - z0); const m = new THREE.Mesh(new THREE.PlaneGeometry(w, L + 1), liquidMat.clone());
+  m.material.uniforms = Object.assign({}, liquidMat.uniforms, { uFlow: { value: new THREE.Vector2((x1 - x0) / L * 0.25, (z1 - z0) / L * 0.25) } });
+  m.rotation.order = 'YXZ'; m.rotation.y = Math.atan2(x1 - x0, z1 - z0); m.rotation.x = -Math.PI / 2; m.position.set((x0 + x1) / 2, y, (z0 + z1) / 2); scene.add(m); }
+
+// ------------------------------------------------------------------ glows: crystals, canopies, lamps, distant towers
+for (const g of SC.glows) sprite(g.slice(0, 3), g[3] * 3.2, new THREE.Color(g[4] ?? 1, g[5] ?? 0.45, g[6] ?? 1.3).multiplyScalar(0.55), 0.6);
+for (const l of SC.lamps) sprite(l, 2.4, new THREE.Color(1.5, 1.25, 1.7), 0.8);
+for (const l of SC.farlights) sprite(l.slice(0, 3), 26, new THREE.Color(l[3], l[4], l[5]).multiplyScalar(1.4), 0.9);
+// motes near the camera (soft, out of focus)
+const MOTES = 900; const moteG = new THREE.BufferGeometry(); const mp = new Float32Array(MOTES * 3), ms = new Float32Array(MOTES);
+for (let i = 0; i < MOTES; i++) { mp[i * 3] = Math.random(); mp[i * 3 + 1] = Math.random(); mp[i * 3 + 2] = Math.random(); ms[i] = Math.random(); }
+moteG.setAttribute('position', new THREE.BufferAttribute(mp, 3)); moteG.setAttribute('aSeed', new THREE.BufferAttribute(ms, 1));
+const moteMat = new THREE.ShaderMaterial({ transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  uniforms: { uTime: U.time, uCam: { value: new THREE.Vector3() }, uBox: { value: 40 }, uTex: { value: soft }, uK: { value: 1.0 } },
+  vertexShader: `attribute float aSeed; uniform float uTime; uniform vec3 uCam; uniform float uBox; varying float vA; varying vec3 vC;
+    void main(){ vec3 p = position * uBox + vec3(sin(uTime * 0.3 + aSeed * 30.0), uTime * (0.2 + aSeed * 0.35), cos(uTime * 0.27 + aSeed * 20.0)) * 1.5;
+      p = uCam + mod(p - uCam + uBox * 0.5, uBox) - uBox * 0.5;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0); gl_Position = projectionMatrix * mv;
+      gl_PointSize = (0.018 + 0.035 * aSeed) * 1400.0 / max(-mv.z, 0.5);
+      vA = (0.5 + 0.5 * sin(uTime * 2.0 + aSeed * 50.0)) * smoothstep(1.0, 4.0, -mv.z) * smoothstep(20.0, 10.0, -mv.z);
+      vC = aSeed > 0.7 ? vec3(0.6, 1.8, 2.0) : vec3(2.0, 1.1, 2.6); }`,
+  fragmentShader: `uniform sampler2D uTex; uniform float uK; varying float vA; varying vec3 vC; void main(){ vec4 t = texture2D(uTex, gl_PointCoord); gl_FragColor = vec4(vC * t.a * vA * uK, 1.0); }` });
+const motes = new THREE.Points(moteG, moteMat); motes.frustumCulled = false; scene.add(motes);
+// the dive: through the rift - a tunnel of light, drawn on a sphere round the camera
+const diveMat = new THREE.ShaderMaterial({ side: THREE.BackSide, depthWrite: false, depthTest: false, transparent: true,
+  uniforms: { uTime: U.time, uDive: { value: 0 }, uFwd: { value: new THREE.Vector3(0, 0, 1) }, uSpeed: { value: 1 } },
+  vertexShader: `varying vec3 vDir; void main(){ vDir = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: NOISE + `uniform float uTime; uniform float uDive; uniform vec3 uFwd; uniform float uSpeed; varying vec3 vDir;
+    void main(){ vec3 d = normalize(vDir); float c = dot(d, uFwd);
+      vec3 ax = normalize(cross(uFwd, vec3(0.0, 1.0, 0.01))); vec3 ay = cross(ax, uFwd); float th = atan(dot(d, ay), dot(d, ax));
+      float r = sqrt(max(1.0 - c * c, 1e-4)) / max(c + 1.05, 0.05); float z = 1.0 / max(r, 0.02) + uTime * 7.0 * uSpeed;
+      float s = 0.0; for (int k = 0; k < 3; k++) { float fk = float(k); float a = floor((th + z * 0.05 * (fk - 1.0)) * (16.0 + fk * 10.0) / 6.2832); float h = hash12(vec2(a, fk * 13.0));
+        float seg = fract(z * (0.12 + 0.05 * fk) + h * 7.0); s += smoothstep(0.80, 1.0, seg) * step(0.45, h) * (1.0 - fk * 0.2); }
+      float sw = 0.5 + 0.5 * sin(th * 3.0 + log(r + 0.01) * 4.0 - uTime * 6.0);
+      vec3 col = vec3(0.7, 0.3, 1.4) * s * smoothstep(0.0, 0.5, r) * 1.6 + vec3(0.25, 0.9, 1.0) * s * sw * 0.6;
+      col += vec3(0.22, 0.05, 0.40) * sw * smoothstep(2.5, 0.2, r) * 0.8 + vec3(1.2, 0.95, 1.3) * exp(-r * 16.0) * 3.0;
+      gl_FragColor = vec4(col, uDive); }` });
+const dive = new THREE.Mesh(new THREE.SphereGeometry(30, 48, 24), diveMat); dive.renderOrder = 50; dive.frustumCulled = false; dive.visible = false; scene.add(dive);
+
+// ------------------------------------------------------------------ post
+const fsScene = new THREE.Scene(), fsCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const fsQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2)); fsQuad.frustumCulled = false; fsScene.add(fsQuad);
+const FSV = `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
+function pass(mat, target) { fsQuad.material = mat; renderer.setRenderTarget(target); renderer.render(fsScene, fsCam); }
+const RT = {};
+function rt(w, h, depth) { const r = new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, depthBuffer: !!depth });
+  if (depth) r.depthTexture = new THREE.DepthTexture(w, h, THREE.FloatType); return r; }
+function ensureRTs(w, h) {
+  if (RT.w === w && RT.h === h) return;
+  for (const k of Object.keys(RT)) if (RT[k] && RT[k].dispose) RT[k].dispose();
+  const h2 = [Math.ceil(w / 2), Math.ceil(h / 2)], h4 = [Math.ceil(w / 4), Math.ceil(h / 4)];
+  RT.w = w; RT.h = h; RT.scene = rt(w, h, true); RT.vol = rt(...h2); RT.comp = rt(w, h); RT.mb = rt(w, h); RT.dofH = rt(...h2); RT.dof = rt(w, h); RT.god = rt(...h4);
+  RT.blm = []; let bw = w, bh = h; for (let i = 0; i < 7; i++) { bw = Math.max(1, Math.ceil(bw / 2)); bh = Math.max(1, Math.ceil(bh / 2)); RT.blm.push(rt(bw, bh)); }
+  RT.blmU = RT.blm.map(r => rt(r.width, r.height));
+  const sw = Math.ceil(w / 4), sh = Math.ceil(h / 8); RT.strA = rt(sw, sh); RT.strB = rt(sw, sh);
+}
+const CAMU = { tDepth: { value: null }, invProj: { value: new THREE.Matrix4() }, camWorld: { value: new THREE.Matrix4() }, camPos: { value: new THREE.Vector3() }, near: { value: 0.1 }, far: { value: 12000 } };
+const RAY = `
+uniform sampler2D tDepth; uniform mat4 invProj; uniform mat4 camWorld; uniform vec3 camPos; uniform float near; uniform float far;
+vec3 viewDir(vec2 uv) { vec4 v = invProj * vec4(uv * 2.0 - 1.0, 1.0, 1.0); return normalize(v.xyz / v.w); }
+float sceneDist(vec2 uv, vec3 vd) { float d = texture2D(tDepth, uv).r; if (d >= 0.999999) return 1e9;
+  float z = d * 2.0 - 1.0; float vz = (2.0 * near * far) / (far + near - z * (far - near)); return vz / -vd.z; }
+`;
+const LIGHTS = NPL;
+const volMat = new THREE.ShaderMaterial({
+  uniforms: Object.assign({}, CAMU, { sunDir: { value: BHC }, sunCol: { value: new THREE.Vector3(1.0, 0.84, 0.70) }, uTime: U.time, frame: { value: 0 }, tNoise: { value: noiseTex },
+    tShadow: { value: null }, shadowMat: { value: new THREE.Matrix4() }, shOn: { value: 1 },
+    haze: { value: 0.00016 }, mist: { value: 0.006 }, mistY: { value: -24 }, mistH: { value: 16 }, dens: { value: 1.0 }, sunK: { value: 1.0 }, ambK: { value: 1.0 },
+    lp: { value: [...Array(LIGHTS)].map(() => new THREE.Vector4()) }, lc: { value: [...Array(LIGHTS)].map(() => new THREE.Vector3()) } }),
+  vertexShader: FSV,
+  fragmentShader: `#include <packing>
+  uniform vec3 sunDir; uniform vec3 sunCol; uniform float uTime; uniform float frame; uniform sampler2D tShadow; uniform mat4 shadowMat; uniform float shOn;
+  uniform float haze; uniform float mist; uniform float mistY; uniform float mistH; uniform float dens; uniform float sunK; uniform float ambK;
+  uniform vec4 lp[${LIGHTS}]; uniform vec3 lc[${LIGHTS}]; varying vec2 vUv;` + RAY + NOISE + N3 + `
+  float vis(vec3 p) { if (shOn < 0.5) return 1.0; vec4 sc = shadowMat * vec4(p, 1.0); sc.xyz /= sc.w;
+    if (sc.x < 0.0 || sc.x > 1.0 || sc.y < 0.0 || sc.y > 1.0 || sc.z > 1.0 || sc.z < 0.0) return 1.0;
+    return step(sc.z - 0.0015, unpackRGBAToDepth(texture2D(tShadow, sc.xy))); }
+  float density(vec3 p) {
+    float m = mist * exp(-max(p.y - mistY, 0.0) / mistH) + mist * 1.1 * exp(-max(p.y + 200.0, 0.0) / 50.0);
+    float n = f3(p * 0.006 + vec3(uTime * 0.0015, 0.0, uTime * 0.001)) * 0.7 + n3(p * 0.021 - vec3(0.0, uTime * 0.004, 0.0)) * 0.3;
+    return (haze + m * smoothstep(0.30, 0.80, n) * 1.8) * dens;
+  }
+  void main(){
+    vec3 vd = viewDir(vUv); vec3 rd = normalize((camWorld * vec4(vd, 0.0)).xyz); float tScene = sceneDist(vUv, vd);
+    float tMax = min(tScene, 700.0); const int N = 40;
+    float jit = hash12(gl_FragCoord.xy + frame * 13.7);
+    float ph = hg(dot(rd, sunDir), 0.55) * 0.9 + hg(dot(rd, sunDir), -0.2) * 0.25;
+    vec3 amb = vec3(0.030, 0.014, 0.060) * ambK;
+    vec3 sum = vec3(0.0); float T = 1.0; float tPrev = 0.0;
+    for (int i = 0; i < N; i++) {
+      float u = (float(i) + jit) / float(N); float t = tMax * u * u; float dt = t - tPrev; tPrev = t;
+      vec3 p = camPos + rd * t; float s = density(p) * dt;
+      if (s > 1e-6) {
+        vec3 L = sunCol * ph * vis(p) * sunK * 0.55 + amb;
+        for (int k = 0; k < ${LIGHTS}; k++) { vec3 d = lp[k].xyz - p; float r2 = dot(d, d); L += lc[k] * lp[k].w * 6.0 / (1.0 + r2 * 0.03); }
+        sum += T * L * s; T *= exp(-s);
+      }
+      if (T < 0.02) break;
+    }
+    gl_FragColor = vec4(sum * vec3(0.72, 0.58, 1.0), T);
+  }`
+});
+const compMat = new THREE.ShaderMaterial({ uniforms: Object.assign({}, CAMU, { tScene: { value: null }, tVol: { value: null }, farFog: { value: 0.0006 }, farCol: { value: new THREE.Vector3(0.018, 0.009, 0.034) }, sunDir: { value: BHC } }), vertexShader: FSV,
+  fragmentShader: `uniform sampler2D tScene; uniform sampler2D tVol; uniform float farFog; uniform vec3 farCol; uniform vec3 sunDir; varying vec2 vUv;` + RAY + `
+  void main(){ vec4 v = texture2D(tVol, vUv); vec3 c = texture2D(tScene, vUv).rgb; vec3 vd = viewDir(vUv); float d = sceneDist(vUv, vd);
+    vec3 rd = normalize((camWorld * vec4(vd, 0.0)).xyz);
+    if (d < 1e8 && d > 700.0) { float f = 1.0 - exp(-(d - 700.0) * farFog); vec3 fc = farCol * (1.0 + 6.0 * pow(max(dot(rd, sunDir), 0.0), 6.0)); c = mix(c, fc, f); }
+    c = c * v.a + v.rgb; gl_FragColor = vec4(c, 1.0); }` });
+const godMat = new THREE.ShaderMaterial({ uniforms: Object.assign({}, CAMU, { tComp: { value: null }, sunUv: { value: new THREE.Vector2() }, strength: { value: 0 } }), vertexShader: FSV,
+  fragmentShader: `uniform sampler2D tComp; uniform vec2 sunUv; uniform float strength; varying vec2 vUv;` + RAY + `
+  void main(){ vec2 d = (sunUv - vUv) / 64.0; vec2 p = vUv; vec3 s = vec3(0.0); float w = 1.0;
+    for (int i = 0; i < 64; i++) { vec3 c = texture2D(tComp, p).rgb; float sky = texture2D(tDepth, p).r >= 0.999999 ? 1.0 : 0.0;
+      float l = dot(c, vec3(0.3, 0.5, 0.2)); s += c * smoothstep(1.0, 6.0, l) * sky * w; w *= 0.968; p += d; }
+    gl_FragColor = vec4(s / 64.0 * strength, 1.0); }` });
+const mbMat = new THREE.ShaderMaterial({ uniforms: Object.assign({}, CAMU, { tSrc: { value: null }, prevVP: { value: new THREE.Matrix4() }, mbK: { value: 0.5 }, frame: { value: 0 } }), vertexShader: FSV,
+  fragmentShader: `uniform sampler2D tSrc; uniform mat4 prevVP; uniform float mbK; uniform float frame; varying vec2 vUv;` + RAY + NOISE + `
+  void main(){ vec3 vd = viewDir(vUv); vec3 rd = normalize((camWorld * vec4(vd, 0.0)).xyz); float d = min(sceneDist(vUv, vd), 1e5);
+    vec4 pc = prevVP * vec4(camPos + rd * d, 1.0); vec2 puv = pc.xy / pc.w * 0.5 + 0.5; vec2 vel = (vUv - puv) * mbK;
+    if (pc.w < 0.0) vel = vec2(0.0);
+    float L = length(vel); if (L > 0.12) vel *= 0.12 / L;
+    float jit = hash12(gl_FragCoord.xy + frame * 7.1);
+    vec3 s = vec3(0.0); for (int i = 0; i < 14; i++) { float f = (float(i) + jit) / 14.0 - 0.5; s += texture2D(tSrc, vUv - vel * f).rgb; }
+    gl_FragColor = vec4(s / 14.0, 1.0); }` });
+const dofHMat = new THREE.ShaderMaterial({ uniforms: Object.assign({}, CAMU, { tSrc: { value: null }, focus: { value: 30 }, aper: { value: 0 }, aspect: { value: 9 / 16 } }), vertexShader: FSV,
+  fragmentShader: `uniform sampler2D tSrc; uniform float focus; uniform float aper; uniform float aspect; varying vec2 vUv;` + RAY + `
+  float dist(vec2 uv) { return min(sceneDist(uv, viewDir(uv)), 1e5); }
+  float coc(float d) { return clamp(aper * abs(d - focus) / max(d, 0.1), 0.0, 0.035); }
+  void main(){ float d0 = dist(vUv); float c0 = coc(d0); vec3 acc = texture2D(tSrc, vUv).rgb; float ws = 1.0;
+    for (int i = 0; i < 40; i++) { float fi = float(i) + 0.5; float r = sqrt(fi / 40.0) * 0.035; float a = fi * 2.39996;
+      vec2 o = vec2(cos(a), sin(a)) * r * vec2(aspect, 1.0); float di = dist(vUv + o); float ci = coc(di);
+      float cc = di > d0 ? min(ci, c0) : ci; float w = smoothstep(r * 0.7, r + 1e-5, cc);
+      acc += texture2D(tSrc, vUv + o).rgb * w; ws += w; }
+    gl_FragColor = vec4(acc / ws, c0); }` });
+const dofMat = new THREE.ShaderMaterial({ uniforms: { tSharp: { value: null }, tBlur: { value: null } }, vertexShader: FSV,
+  fragmentShader: `uniform sampler2D tSharp; uniform sampler2D tBlur; varying vec2 vUv;
+  void main(){ vec4 b = texture2D(tBlur, vUv); vec3 s = texture2D(tSharp, vUv).rgb; gl_FragColor = vec4(mix(s, b.rgb, smoothstep(0.0012, 0.006, b.a)), 1.0); }` });
+const downMat = new THREE.ShaderMaterial({ uniforms: { tSrc: { value: null }, texel: { value: new THREE.Vector2() }, first: { value: 0 } }, vertexShader: FSV,
+  fragmentShader: `uniform sampler2D tSrc; uniform vec2 texel; uniform float first; varying vec2 vUv;
+  vec3 s(vec2 o){ vec3 c = texture2D(tSrc, vUv + o * texel).rgb; if (first > 0.5) { c = min(c, vec3(80.0)); c *= smoothstep(0.8, 3.0, dot(c, vec3(0.3, 0.5, 0.2))) * 0.95 + 0.05; } return c; }
+  void main(){ vec3 c = s(vec2(0.0)) * 0.25 + (s(vec2(-1.0, -1.0)) + s(vec2(1.0, -1.0)) + s(vec2(-1.0, 1.0)) + s(vec2(1.0, 1.0))) * 0.125
+    + (s(vec2(-2.0, 0.0)) + s(vec2(2.0, 0.0)) + s(vec2(0.0, -2.0)) + s(vec2(0.0, 2.0))) * 0.0625; gl_FragColor = vec4(c, 1.0); }` });
+const upMat = new THREE.ShaderMaterial({ uniforms: { tLow: { value: null }, tHigh: { value: null }, texel: { value: new THREE.Vector2() } }, vertexShader: FSV,
+  fragmentShader: `uniform sampler2D tLow; uniform sampler2D tHigh; uniform vec2 texel; varying vec2 vUv;
+  void main(){ vec3 c = vec3(0.0);
+    for (int i = -1; i <= 1; i++) for (int j = -1; j <= 1; j++) c += texture2D(tLow, vUv + vec2(float(i), float(j)) * texel).rgb * (i == 0 && j == 0 ? 0.25 : (i == 0 || j == 0 ? 0.125 : 0.0625));
+    gl_FragColor = vec4(c + texture2D(tHigh, vUv).rgb, 1.0); }` });
+const strMat = new THREE.ShaderMaterial({ uniforms: { tSrc: { value: null }, texel: { value: new THREE.Vector2() }, spread: { value: 1 }, first: { value: 0 } }, vertexShader: FSV,
+  fragmentShader: `uniform sampler2D tSrc; uniform vec2 texel; uniform float spread; uniform float first; varying vec2 vUv;
+  void main(){ vec3 s = vec3(0.0); float ws = 0.0; for (int i = -7; i <= 7; i++) { float w = exp(-float(i * i) / 18.0); vec3 c = texture2D(tSrc, vUv + vec2(float(i) * spread * texel.x, 0.0)).rgb;
+      if (first > 0.5) c *= smoothstep(2.0, 8.0, dot(c, vec3(0.3, 0.5, 0.2))); s += c * w; ws += w; } gl_FragColor = vec4(s / ws, 1.0); }` });
+// lens dirt: smudges and specks, only seen where bright light falls on the lens
+const dirtTex = (() => { const c = document.createElement('canvas'); c.width = 512; c.height = 910; const g = c.getContext('2d'); g.fillStyle = '#000'; g.fillRect(0, 0, 512, 910);
+  let s = 7; const R = () => (s = (s * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < 90; i++) { const x = R() * 512, y = R() * 910, r = 6 + R() * 50; const gr = g.createRadialGradient(x, y, 0, x, y, r); const a = 0.04 + R() * 0.16;
+    gr.addColorStop(0, `rgba(255,255,255,${a})`); gr.addColorStop(0.7, `rgba(255,255,255,${a * 0.6})`); gr.addColorStop(1, 'rgba(255,255,255,0)'); g.fillStyle = gr; g.fillRect(x - r, y - r, 2 * r, 2 * r); }
+  for (let i = 0; i < 400; i++) { g.fillStyle = `rgba(255,255,255,${0.1 + R() * 0.3})`; g.beginPath(); g.arc(R() * 512, R() * 910, 0.6 + R() * 1.8, 0, 6.283); g.fill(); }
+  return new THREE.CanvasTexture(c); })();
+const finalMat = new THREE.ShaderMaterial({
+  uniforms: { tComp: { value: null }, tBloom: { value: null }, tGod: { value: null }, tStr: { value: null }, tDirt: { value: dirtTex }, exposure: { value: 1.0 }, bloomK: { value: 0.08 }, dirtK: { value: 2.5 }, strK: { value: 0.35 },
+    godTint: { value: new THREE.Vector3(1.0, 0.8, 0.75) }, uTime: U.time, flash: { value: 0 }, flashCol: { value: new THREE.Vector3(1, 0.95, 1) }, black: { value: 0 }, vig: { value: 0.35 }, ca: { value: 0.0015 }, grain: { value: 0.035 },
+    zoom: { value: 1 }, zblur: { value: 0 }, shake: { value: new THREE.Vector2() }, rot: { value: 0 }, bars: { value: 0 }, sat: { value: 1.0 }, contrast: { value: 1.0 }, tint: { value: new THREE.Vector3(1, 1, 1) },
+    lines: { value: 0 }, lineSeed: { value: 0 }, aspect: { value: 9 / 16 } },
+  vertexShader: FSV,
+  fragmentShader: NOISE + `uniform sampler2D tComp; uniform sampler2D tBloom; uniform sampler2D tGod; uniform sampler2D tStr; uniform sampler2D tDirt; uniform float exposure; uniform float bloomK; uniform float dirtK; uniform float strK; uniform vec3 godTint;
+  uniform float uTime; uniform float flash; uniform vec3 flashCol; uniform float black; uniform float vig; uniform float ca; uniform float grain; uniform float zoom; uniform float zblur; uniform vec2 shake; uniform float rot; uniform float bars;
+  uniform float sat; uniform float contrast; uniform vec3 tint; uniform float lines; uniform float lineSeed; uniform float aspect; varying vec2 vUv;
+  vec3 aces(vec3 x) { x *= 0.6; return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0); }
+  vec3 hdr(vec2 uv) { vec3 b = texture2D(tBloom, uv).rgb; vec3 dirt = texture2D(tDirt, uv).rgb;
+    return texture2D(tComp, uv).rgb + b * bloomK * (1.0 + dirt * dirtK) + texture2D(tGod, uv).rgb * godTint + texture2D(tStr, uv).rgb * strK * vec3(0.7, 0.8, 1.3); }
+  void main(){
+    vec2 q0 = vUv - 0.5; float cr = cos(rot), sr = sin(rot);
+    vec2 q = vec2((q0.x * aspect * cr - q0.y * sr) / aspect, q0.x * aspect * sr + q0.y * cr);
+    vec2 uv = q / zoom + 0.5 + shake;
+    vec2 o = (uv - 0.5) * ca;
+    vec3 c = vec3(0.0);
+    if (zblur > 0.0) { for (int i = 0; i < 10; i++) { float f = 1.0 - zblur * float(i) / 10.0; vec2 u2 = (uv - 0.5) * f + 0.5; c += vec3(hdr(u2 + o).r, hdr(u2).g, hdr(u2 - o).b); } c /= 10.0; }
+    else c = vec3(hdr(uv + o).r, hdr(uv).g, hdr(uv - o).b);
+    c = max(c * exposure * tint, 0.0); c = aces(c);
+    float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    c = mix(vec3(l), c, 1.12 * sat);
+    c += vec3(0.010, -0.004, 0.030) * (1.0 - smoothstep(0.0, 0.35, l));                     // violet-blue shadows
+    c *= mix(vec3(1.0), vec3(1.04, 1.0, 0.95), smoothstep(0.5, 1.0, l));                      // warm highlights
+    c = mix(c, c * c * (3.0 - 2.0 * c), 0.22 * contrast);
+    vec2 vq = vUv - 0.5; c *= 1.0 - vig * pow(clamp(length(vq * vec2(1.0, 0.95)) * 1.35, 0.0, 1.0), 2.4);
+    if (lines > 0.0) { float a = atan(vq.y, vq.x * aspect); float h = hash12(vec2(floor(a * 70.0), lineSeed)); float rr = length(vq * vec2(aspect, 1.0));
+      c = mix(c, vec3(1.0, 0.92, 1.0), lines * step(0.88, h) * smoothstep(0.20, 0.55, rr) * 0.55); }
+    c += (hash12(gl_FragCoord.xy + fract(uTime * 7.0) * 100.0) - 0.5) * grain;
+    c = mix(c, flashCol, flash); c *= 1.0 - black;
+    if (vUv.y < bars || vUv.y > 1.0 - bars) c = vec3(0.0);
+    c = pow(clamp(c, 0.0, 1.0), vec3(1.0 / 2.2));
+    gl_FragColor = vec4(c, 1.0);
+  }`
+});
+// ------------------------------------------------------------------ one frame
+let FRAME = 0;
+const pcam = new THREE.PerspectiveCamera();
+function placeCam(cam, v, w, h) { cam.aspect = w / h; cam.fov = v.fov || 55; cam.near = 0.1; cam.far = 12000; cam.updateProjectionMatrix();
+  cam.position.set(...v.pos); cam.up.set(0, 1, 0); cam.lookAt(new THREE.Vector3(...v.look)); if (v.roll) cam.rotateZ(v.roll * DEG); cam.updateMatrixWorld(); }
+window.renderView = (v) => {
+  const w = v.w, h = v.h; renderer.setSize(w, h, false); ensureRTs(w, h);
+  placeCam(camera, v, w, h);
+  U.time.value = v.time || 0;
+  sky.position.copy(camera.position); dive.position.copy(camera.position);
+  BHU.uBhK.value = v.bh ?? 1.0; EMK.value = v.emk ?? 1.0;
+  // key light and its shadow box, centred where we are looking
+  const sc = new THREE.Vector3(...(v.shadowC || v.look)); const sr = v.shadowR || 80;
+  Object.assign(sun.shadow.camera, { left: -sr, right: sr, top: sr, bottom: -sr, near: 1, far: 900 }); sun.shadow.camera.updateProjectionMatrix();
+  sun.target.position.copy(sc); sun.position.copy(sc).addScaledVector(BHC, 450); sun.intensity = 3.0 * (v.key ?? 1.0);
+  hemi.intensity = 0.55 * (v.amb ?? 1.0);
+  fill.target.position.copy(sc); fill.position.copy(sc).add(new THREE.Vector3(-BHC.x * 300 + 120, 160, -BHC.z * 300)); fill.intensity = 0.6 * (v.fill ?? 1.0);
+  // crystals: turning, bobbing
+  CRY.forEach((k, i) => { const t = (v.time || 0) + k.ph; k.g.position.set(k.base[0], k.base[1] + Math.sin(t * 1.4) * 0.45, k.base[2]);
+    k.a.rotation.set(t * 0.9, t * 1.3, 0); k.b.rotation.set(-t * 1.1, 0, t * 0.8); k.k.rotation.set(t * 2.0, t * 1.7, 0); });
+  beamFx(v.beams || []);
+  vortexMat.uniforms.uI.value = v.gate ?? 1.0; vortexMat.uniforms.uSpin.value = v.spin ?? 1.0; vpMat.uniforms.uI.value = v.gate ?? 1.0;
+  dive.visible = (v.dive || 0) > 0; diveMat.uniforms.uDive.value = v.dive || 0; if (v.diveFwd) diveMat.uniforms.uFwd.value.set(...v.diveFwd); diveMat.uniforms.uSpeed.value = v.diveSpeed ?? 1;
+  moteMat.uniforms.uCam.value.copy(camera.position); moteMat.uniforms.uK.value = v.motes ?? 1;
+  const lights = (v.lights || []);
+  PL.forEach((l, i) => { const q = lights[i]; if (q) { l.position.set(q[0], q[1], q[2]); l.intensity = q[3] * 60; l.color.setRGB(q[4], q[5], q[6]); l.distance = q[7] || 70; } else l.intensity = 0; });
+  for (let i = 0; i < LIGHTS; i++) { const q = lights[i]; if (q) { volMat.uniforms.lp.value[i].set(q[0], q[1], q[2], q[3]); volMat.uniforms.lc.value[i].set(q[4], q[5], q[6]); } else volMat.uniforms.lp.value[i].set(0, -9999, 0, 0); }
+  // 1. scene (the shadow map is drawn first, by the renderer)
+  renderer.setRenderTarget(RT.scene); renderer.render(scene, camera);
+  CAMU.tDepth.value = RT.scene.depthTexture; CAMU.invProj.value.copy(camera.projectionMatrixInverse); CAMU.camWorld.value.copy(camera.matrixWorld);
+  CAMU.camPos.value.copy(camera.position); CAMU.near.value = camera.near; CAMU.far.value = camera.far;
+  // 2. mist with light shafts
+  const f = v.fog || {}; const vu = volMat.uniforms;
+  vu.frame.value = (FRAME++) % 64; vu.tShadow.value = sun.shadow.map ? sun.shadow.map.texture : null; vu.shadowMat.value.copy(sun.shadow.matrix); vu.shOn.value = sun.shadow.map ? 1 : 0;
+  vu.haze.value = f.haze ?? 0.00016; vu.mist.value = f.mist ?? 0.006; vu.mistY.value = f.mistY ?? -24; vu.mistH.value = f.mistH ?? 16; vu.dens.value = f.dens ?? 1.0; vu.sunK.value = (f.sun ?? 1.0) * (v.key ?? 1.0); vu.ambK.value = f.amb ?? 1.0;
+  pass(volMat, RT.vol);
+  compMat.uniforms.tScene.value = RT.scene.texture; compMat.uniforms.tVol.value = RT.vol.texture; compMat.uniforms.farFog.value = f.far ?? 0.0006; pass(compMat, RT.comp);
+  let cur = RT.comp;
+  // 3. motion blur (camera)
+  if (v.prev) { placeCam(pcam, Object.assign({}, v, v.prev), w, h); const pvp = new THREE.Matrix4().multiplyMatrices(pcam.projectionMatrix, pcam.matrixWorldInverse);
+    const pos = new THREE.Vector3(...v.pos), pp = new THREE.Vector3(...v.prev.pos); const moved = pos.distanceTo(pp) > 1e-4 || JSON.stringify(v.look) !== JSON.stringify(v.prev.look) || (v.fov !== v.prev.fov) || ((v.roll || 0) !== (v.prev.roll || 0));
+    if (moved) { mbMat.uniforms.prevVP.value.copy(pvp); mbMat.uniforms.tSrc.value = cur.texture; mbMat.uniforms.mbK.value = v.shutter ?? 0.5; mbMat.uniforms.frame.value = FRAME; pass(mbMat, RT.mb); cur = RT.mb; } }
+  // 4. depth of field
+  if ((v.dof || 0) > 0) { const du = dofHMat.uniforms; du.tSrc.value = cur.texture; du.focus.value = v.focus || 30; du.aper.value = v.dof; du.aspect.value = h / w; pass(dofHMat, RT.dofH);
+    dofMat.uniforms.tSharp.value = cur.texture; dofMat.uniforms.tBlur.value = RT.dofH.texture; pass(dofMat, RT.dof); cur = RT.dof; }
+  // 5. sun shafts from the disk
+  const sp = camera.position.clone().addScaledVector(BHC, 4000).project(camera);
+  const facing = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion).dot(BHC);
+  godMat.uniforms.tComp.value = cur.texture; godMat.uniforms.sunUv.value.set(sp.x * 0.5 + 0.5, sp.y * 0.5 + 0.5);
+  godMat.uniforms.strength.value = (v.god ?? 1.0) * THREE.MathUtils.smoothstep(facing, 0.1, 0.7) * (sp.z < 1 ? 1 : 0); pass(godMat, RT.god);
+  // 6. bloom, streaks
+  let src = cur;
+  for (let i = 0; i < RT.blm.length; i++) { downMat.uniforms.tSrc.value = src.texture; downMat.uniforms.texel.value.set(1 / src.width, 1 / src.height); downMat.uniforms.first.value = i === 0 ? 1 : 0; pass(downMat, RT.blm[i]); src = RT.blm[i]; }
+  let low = RT.blm[RT.blm.length - 1];
+  for (let i = RT.blm.length - 2; i >= 0; i--) { upMat.uniforms.tLow.value = low.texture; upMat.uniforms.tHigh.value = RT.blm[i].texture; upMat.uniforms.texel.value.set(1 / low.width, 1 / low.height); pass(upMat, RT.blmU[i]); low = RT.blmU[i]; }
+  const su = strMat.uniforms; su.texel.value.set(1 / RT.strA.width, 1 / RT.strA.height);
+  su.tSrc.value = RT.blm[1].texture; su.first.value = 1; su.spread.value = 1; pass(strMat, RT.strA); su.first.value = 0;
+  su.tSrc.value = RT.strA.texture; su.spread.value = 4; pass(strMat, RT.strB); su.tSrc.value = RT.strB.texture; su.spread.value = 14; pass(strMat, RT.strA);
+  // 7. grade, out
+  const e = v.post || {}; const fu = finalMat.uniforms;
+  fu.tComp.value = cur.texture; fu.tBloom.value = low.texture; fu.tGod.value = RT.god.texture; fu.tStr.value = RT.strA.texture; fu.aspect.value = w / h;
+  fu.exposure.value = e.exposure ?? 1.0; fu.flash.value = e.flash ?? 0; fu.flashCol.value.set(...(e.flashCol || [1, 0.95, 1])); fu.black.value = e.black ?? 0; fu.vig.value = e.vig ?? 0.35; fu.ca.value = e.ca ?? 0.0015; fu.grain.value = e.grain ?? 0.035;
+  fu.zoom.value = e.zoom ?? 1; fu.zblur.value = e.zblur ?? 0; fu.shake.value.set(...(e.shake || [0, 0])); fu.rot.value = (e.rot ?? 0) * DEG; fu.bars.value = e.bars ?? 0; fu.sat.value = e.sat ?? 1; fu.contrast.value = e.contrast ?? 1;
+  fu.tint.value.set(...(e.tint || [1, 1, 1])); fu.lines.value = e.lines ?? 0; fu.lineSeed.value = e.lineSeed ?? 0; fu.bloomK.value = e.bloom ?? 0.08; fu.strK.value = e.streak ?? 0.35; fu.dirtK.value = e.dirt ?? 2.5;
+  pass(finalMat, null);
+  return renderer.domElement.toDataURL('image/png');
+};
+window.READY = true;
+</script></body></html>

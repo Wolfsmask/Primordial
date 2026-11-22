@@ -1,19 +1,23 @@
-Visuals: everything was made for this video. The End is rebuilt from scratch: a main island with obsidian pillars,
-crystals and the exit portal, and floating isles round it (a grove of glowing trees, an end city of purpur towers,
-crystal spires, a chorus forest, drifting debris, a gateway), all generated in Python and meshed as voxels with
-ambient occlusion. The block textures are original 16 x 16 pixel art. The dragon is a blocky model built from boxes.
-The renderer is a shader pipeline in the spirit of the one made for the bleedout spot video, designed for the End: an
-HDR scene, a void sky with a nebula, stars and an eclipsed sun with its corona, a glowing void sea far below, void mist
-raymarched with in-scattering from the eclipse and the crystals, crepuscular rays, a bloom pyramid and a filmic
-tonemap. The phone lock screen and notifications are an original design drawn for this video.
+Visuals: everything was made for this video. The End is rebuilt from scratch and generated in Python as voxels:
+the main island with the Rift Gate (an obsidian ring with gold inlay, runes and chevrons over a stepped plinth), a
+lamp-lit causeway, guardian obelisks and rune pillars with crystals; an End City of pagoda towers with lit windows,
+eaves, banners, spires and bridges; crystal spires of violet and teal hexagonal crystals; an elder grove with a giant
+glowing tree, hanging vines and a pool that spills into the void as a light fall; and the far End out to 1.5 km
+(islands, broken towers, colossal pillars). The block textures are original 16 x 16 pixel art, with normal,
+roughness and metalness maps painted for them.
 
-Typography: Cinzel by the Cinzel Project Authors (Natanael Gama), SIL Open Font License 1.1 (see source/web).
-Interface and subtitles: Inter by Rasmus Andersson, SIL Open Font License 1.1.
+The renderer is a custom shader pipeline (three.js): physically based blocks with sky reflections and soft shadows, a
+black hole in the sky lensed with a precomputed Schwarzschild ray trace (its accretion disk, Doppler beaming and the
+far side bent over the top), a nebula and galactic band, volumetric mist with shadowed light shafts, atmospheric
+perspective, camera motion blur, depth of field, bloom with lens dirt, anamorphic streaks and a filmic grade.
+
+The phone lock screen, notifications, caption and the blocky title lettering are original designs drawn for this
+video. Interface and caption type: Inter by Rasmus Andersson, SIL Open Font License 1.1.
 
 Music: "Undress Rehearsal (Hardtekk Super Slowed)" by VXLTAGE, the track supplied by the channel, edited for this
 video (a tape stop before the drop, the break pulled under water, an echo-out ending). It is a commercial recording
 and is NOT included in source/. A YouTube upload with it is likely to receive a Content ID claim (revenue goes to the
-rights holders; the video normally stays up). The lyric subtitles were transcribed from the vocal by ear.
+rights holders; the video normally stays up).
 
 This is a fan-made animation in a blocky-game style. It is not affiliated with Mojang, Microsoft or Rockstar Games;
 "The End Update" is imagined, and GTA VI is only mentioned in the joke.

@@ -1,7 +1,7 @@
 """Browser driver for web/end.html (headless Chromium + swiftshader)."""
 import base64, io, os, subprocess, sys, time, urllib.request
 from PIL import Image
-HERE = os.path.dirname(os.path.abspath(__file__)); WEB = os.path.join(HERE, 'web'); PORT = 8797; PAGE = 'end.html'
+HERE = os.path.dirname(os.path.abspath(__file__)); WEB = os.path.join(HERE, 'web'); PORT = 8798; PAGE = "end2.html"
 
 
 def ensure_server():
