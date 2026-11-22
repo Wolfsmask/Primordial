@@ -1,5 +1,5 @@
 """Render the End Update (v2): 3D frames from web/end2.html; the phone, the caption, the title and the last notification
-drawn in 2D.   python3 end2_film.py test t1,t2,... [WxH] [sheet] | render a:b [WxH]   -> frames/f_%05d.jpg"""
+drawn in 2D.   python3 end2_film.py test t1,t2,... [WxH] [sheet] | render a:b|@list.txt [WxH] [outdir]   -> frames/f_%05d.jpg"""
 import os, sys, time
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
@@ -270,7 +270,8 @@ if __name__ == '__main__':
         for i, k in enumerate(ks): s.paste(Image.open(os.path.join(d, 'f_%05d.png' % k)).resize((W_, H_)), ((i % cols) * W_, (i // cols) * H_))
         out = sys.argv[4] if len(sys.argv) > 4 else 'test_sheet.png'; s.save(os.path.join(HERE, out)); print('sheet', out)
     else:
-        a, b_ = (int(x) for x in sys.argv[2].split(':'))
+        if sys.argv[2].startswith('@'): ks = [int(x) for x in open(sys.argv[2][1:]).read().split()]; a, b_ = ks[0], ks[-1] + 1
+        else: a, b_ = (int(x) for x in sys.argv[2].split(':')); ks = list(range(a, b_))
         w, h = (int(x) for x in sys.argv[3].split('x')) if len(sys.argv) > 3 else (720, 1280)
-        render(list(range(a, b_)), os.path.join(HERE, 'frames'), w, h)
+        render(ks, os.path.join(HERE, sys.argv[4] if len(sys.argv) > 4 else 'frames'), w, h)
         print('frames %d..%d done' % (a, b_))

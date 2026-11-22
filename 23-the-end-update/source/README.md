@@ -17,7 +17,10 @@ in headless Chromium; the phone, the caption, the title and the last notificatio
    where the two bars match), pulls the break under water and echoes out on "start". `beats.npy` holds the song's beat times.
 6. `end2_anim.py` is the edit on that cut: a new shot on every beat of the drop (a place per bar: the Rift Gate, the
    End City, the crystal spires, the grove, everything, with a whip pan into each), a crystal joining the charge on every
-   beat after the break, the punch-ins, the title and caption timing, the lights and the grade per frame.
+   beat after the break, the punch-ins, the title and caption timing, the lights and the grade per frame. The other beat
+   cuts are zoom-twists: the shot zooms in and rolls into the cut, the next one starts zoomed in and rolled further round
+   and unwinds (camera roll and field of view, so the renderer's motion blur smears them).
 7. `python3 end2_film.py test 10,20,30` renders a contact sheet; `python3 end2_film.py render 0:1855 1080x1920` renders
-   the 30.9 s at 60 fps into `frames/` (split it across processes, e.g. `0:700`, `700:1300`, `1300:1855`).
+   the 30.9 s at 60 fps into `frames/` (split it across processes, e.g. `0:700`, `700:1300`, `1300:1855`, or give it a
+   file of frame numbers: `render @list.txt 1080x1920`).
 8. `bash encode2.sh` encodes the frames with the edited music.

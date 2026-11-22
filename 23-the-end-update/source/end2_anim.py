@@ -161,6 +161,19 @@ CHARGE = ('charge', 'charge3', 'charge5', 'chargewide', 'approach', 'dive')
 # whip pans into each new place (direction +1 / -1)
 WHIPS = {kb(4): 1, kb(8): -1, kb(12): 1, kb(16): -1}
 WHIP_PRE, WHIP_POST, WHIP_DEG = 0.13, 0.17, 60.0
+# zoom-twist cuts (the edit transition): the shot zooms in and rolls one way into the cut, the next one starts
+# zoomed in and rolled further round, then unwinds and zooms back out. Every beat cut that is not a whip pan.
+_tw = [T_DROP] + [kb(i) for i in range(1, len(DROP_SHOTS) + 1) if kb(i) not in WHIPS] + [float(t) for t in CB]
+TWISTS = {tc: (1 if i % 2 == 0 else -1) for i, tc in enumerate(_tw)}
+TW_PRE, TW_POST, TW_DEG, TW_ZOOM = 0.16, 0.20, 35.0, 0.75
+
+
+def twist(v, a, b):
+    """(roll, zoom-1, k) from the zoom-twist cuts for a time v inside the shot [a, b)"""
+    for tc, dr in TWISTS.items():
+        if abs(b - tc) < 1e-6 and v >= tc - TW_PRE: k = ein((v - (tc - TW_PRE)) / TW_PRE, 2.6); return dr * TW_DEG * k, TW_ZOOM * k, k
+        if abs(a - tc) < 1e-6 and v < tc + TW_POST: k = 1 - eout((v - tc) / TW_POST, 2.6); return -dr * TW_DEG * k, TW_ZOOM * k, k
+    return 0.0, 0.0, 0.0
 
 
 def shot_index(v):
@@ -190,6 +203,8 @@ def cam(v, si=None):
     for tc, dr in WHIPS.items():
         if tc - WHIP_PRE <= v < tc and abs(b - tc) < 1e-6: x = (v - (tc - WHIP_PRE)) / WHIP_PRE; yaw += dr * WHIP_DEG * ein(x, 2.4); roll += dr * 10 * ein(x, 2)
         if tc <= v < tc + WHIP_POST and abs(a - tc) < 1e-6: x = (v - tc) / WHIP_POST; yaw -= dr * WHIP_DEG * (1 - eout(x, 2.4)); roll -= dr * 10 * (1 - eout(x, 2))
+    tr, tz, _ = twist(v, a, b); roll += tr
+    if tz: c['fov'] = float(2 * np.degrees(np.arctan(np.tan(np.radians(c['fov']) / 2) / (1 + tz))))
     d = rot_y(d, yaw)
     hh = handheld(v, 0.0025 * np.linalg.norm(d)) if name not in ('intro',) else handheld(v * 0.5, 0.0012 * np.linalg.norm(d))
     c['pos'] = pos; c['look'] = pos + d + hh; c['roll'] = roll; c['name'] = name; c['si'] = si
@@ -269,6 +284,9 @@ def post_at(v, c):
         if 0 <= d < 0.16 and nm not in ('break',):
             f0 = 0.5 if a == T_DROP else (0.2 if any(abs(a - tc) < 1e-6 for tc in WHIPS) else 0.1)
             e['flash'] = max(e['flash'], f0 * (1 - d / 0.16))
+    if c and c.get('si') is not None:                       # the zoom-twist smears outward too
+        _, _, k = twist(v, SHOTS[c['si']][0], SHOTS[c['si']][1])
+        if k > 0: e['zblur'] = max(e['zblur'], 0.16 * k ** 1.3); e['ca'] += 0.008 * k
     if T_BREAK <= v < T_GIRL:
         d = v - T_BREAK; e.update(bloom=0.13, sat=0.8, vig=0.6, exposure=0.85, tint=[0.85, 0.92, 1.18], contrast=0.9)
         if d < 0.25: e['flash'] = 0.45 * (1 - d / 0.25)
@@ -322,6 +340,7 @@ def frame(k):
         r['prev'] = dict(pos=[float(x) for x in pc['pos']], look=[float(x) for x in pc['look']], fov=float(pc['fov']), roll=float(pc.get('roll', 0.0)))
         r['shutter'] = 0.5
         if any(tc - WHIP_PRE <= v < tc + WHIP_POST for tc in WHIPS): r['shutter'] = 0.9
+        if any(tc - TW_PRE <= v < tc + TW_POST for tc in TWISTS): r['shutter'] = 0.85
     out['render'] = r
     if c['name'] == 'intro' and v < T_SIL:
         out['title'] = dict(v=v, t0=T_OPEN, tape=T_TAPE, sil=T_SIL, beats=INTRO_BEATS)
