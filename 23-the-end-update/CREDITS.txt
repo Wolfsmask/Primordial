@@ -15,9 +15,9 @@ The phone lock screen, notifications, caption and the blocky title lettering are
 video. Interface and caption type: Inter by Rasmus Andersson, SIL Open Font License 1.1.
 
 Music: "Undress Rehearsal (Hardtekk Super Slowed)" by VXLTAGE, the track supplied by the channel, edited for this
-video (a tape stop before the drop, the break pulled under water, an echo-out ending). It is a commercial recording
-and is NOT included in source/. A YouTube upload with it is likely to receive a Content ID claim (revenue goes to the
-rights holders; the video normally stays up).
+video (a tape stop before the drop, two bars cut from the drop, the break pulled under water, an echo-out ending). It
+is a commercial recording and is NOT included in source/. A YouTube upload with it is likely to receive a Content ID
+claim (revenue goes to the rights holders; the video normally stays up).
 
 This is a fan-made animation in a blocky-game style. It is not affiliated with Mojang, Microsoft or Rockstar Games;
 "The End Update" is imagined, and GTA VI is only mentioned in the joke.

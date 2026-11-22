@@ -13,10 +13,11 @@ in headless Chromium; the phone, the caption, the title and the last notificatio
 4. `web/end2.html` is the renderer. Put three.js in `web/node_modules/three` (`npm i three@0.160.0` inside `web/`). It
    exposes `renderView(params)`, which returns one finished frame.
 5. `python3 end_audio.py` cuts the song (not included: put it next to the scripts as `song.wav`) into `audio_edit.wav`:
-   it starts at "It's your undress rehearsal", tape-stops before the drop, pulls the break under water and echoes out on
-   "start". `beats.npy` holds the song's beat times.
-6. `end2_anim.py` is the edit on that cut: the shots, every cut on a beat, the punch-ins and whip pans, the crystals
-   charging the gate, the title and caption timing, the lights and the grade per frame.
-7. `python3 end2_film.py test 10,20,30` renders a contact sheet; `python3 end2_film.py render 0:2196 1080x1920` renders
-   the 36.6 s at 60 fps into `frames/` (split it across processes, e.g. `0:800`, `800:1500`, `1500:2196`).
+   it starts at "It's your undress rehearsal", tape-stops before the drop, splices two bars out of the drop (on the beat,
+   where the two bars match), pulls the break under water and echoes out on "start". `beats.npy` holds the song's beat times.
+6. `end2_anim.py` is the edit on that cut: a new shot on every beat of the drop (a place per bar: the Rift Gate, the
+   End City, the crystal spires, the grove, everything, with a whip pan into each), a crystal joining the charge on every
+   beat after the break, the punch-ins, the title and caption timing, the lights and the grade per frame.
+7. `python3 end2_film.py test 10,20,30` renders a contact sheet; `python3 end2_film.py render 0:1855 1080x1920` renders
+   the 30.9 s at 60 fps into `frames/` (split it across processes, e.g. `0:700`, `700:1300`, `1300:1855`).
 8. `bash encode2.sh` encodes the frames with the edited music.

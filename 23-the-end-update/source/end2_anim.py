@@ -2,10 +2,12 @@
   0      - 4.904   the phone: GTA VI at midnight, then the End Update lands; tap -> caption "The End Update"
   4.904  - 9.30    THE END UPDATE in the middle (pulsing on the beat) while the camera slowly pushes in on the Rift Gate;
                    the tape stop freezes it, black
-  9.605  - 28.41   the drop: a shot per bar or half bar, every cut on a beat, punch-ins on every beat, whips between places
-  28.41  - 29.52   the break, under water: slow motion, the black hole
-  29.52  - 34.10   "Girl, tell me now ... it's about to start": the crystals charge the gate; on "start" into the Rift
-  34.10  - 36.6    black; GTA VI: "your game is ready to play"
+  9.605  - 23.23   the drop (two bars shorter than the song's): a new shot on every kick; a place per bar (the Rift Gate,
+                   the End City, the crystal spires, the grove, everything) with a whip pan into each, a punch-in on every beat
+  23.23  - 24.34   the break, under water: slow motion, the black hole
+  24.34  - 28.92   "Girl, tell me now ... it's about to start": a crystal joins the charge on every beat, a new angle on each;
+                   on "start" into the Rift
+  28.92  - 30.92   black; GTA VI: "your game is ready to play"
 frame(k) -> dict"""
 import json, os
 import numpy as np
@@ -13,21 +15,24 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 FPS = 60
 SC = json.load(open(os.path.join(HERE, 'web', 'scene.json')))
-T_END = 36.6
-NFRAMES = int(round(T_END * FPS))
+CUT_A, CUT_B = 24.055873015873015, 29.23392290249433      # song [CUT_A, CUT_B) is spliced out of the drop (end_audio.py)
 DEG = np.pi / 180
 UP = np.array([0, 1.0, 0])
 BHC = np.array([0, np.sin(19 * DEG), np.cos(19 * DEG)])
 
 
-def song_to_v(t): return t - 21.40 + 9.55 if t >= 21.40 else t - 12.0
+def song_to_v(t):
+    if t >= CUT_B: return t - (CUT_B - CUT_A) - 21.40 + 9.55
+    return t - 21.40 + 9.55 if t >= 21.40 else t - 12.0
 _b = np.load(os.path.join(HERE, 'beats.npy'))
-BEATS = np.array([song_to_v(t) for t in _b if 12.0 < t < 46.2 and not (20.9 < t < 21.40)])
+BEATS = np.array([song_to_v(t) for t in _b if 12.0 < t < 46.2 and not (20.9 < t < 21.40) and not (CUT_A - 0.01 < t < CUT_B - 0.01)])
 DB = BEATS[BEATS >= 9.6]                     # the drop's beats: DB[0] = 9.605
 def kb(k): return float(DB[k])
 T_TAP = song_to_v(16.254); T_OPEN = song_to_v(16.904); T_N2 = song_to_v(14.977)
 T_TAPE = 8.90; T_SIL = 9.30; T_DROP = kb(0)
 T_BREAK = song_to_v(40.26); T_GIRL = song_to_v(41.37); T_START = song_to_v(45.04); T_CUT = song_to_v(45.95)
+T_END = T_CUT + 2.0
+NFRAMES = int(round(T_END * FPS))
 GC = np.array(SC['gate']['c']); CRY = np.array(SC['crystals']); CHEV = np.array(SC['gate']['chevrons'])
 
 
@@ -51,73 +56,110 @@ def orbit(c, r, a_deg, y): a = a_deg * DEG; return np.array([c[0] + r * np.cos(a
 
 
 # ---------------------------------------------------------------- shots: (t0, t1, name, fn(u) -> dict)
+def mv(p0, p1, l0, l1, u, a=0.4, fov=(60, 60), roll=(0, 0), **kw):
+    """one beat's move: most of it on the hit, then a glide"""
+    w = ramp(u, a); return dict(pos=lerp(p0, p1, w), look=lerp(l0, l1, w), fov=float(lerp(*fov, w)), roll=float(lerp(*roll, w)), **kw)
+
+
 def S_intro(u):              # the slow push in on the Rift, under the title
     p = lerp((-4, 15, -215), (0, 25, -100), u ** 0.85); return dict(pos=p, look=lerp((0, 37, 0), (0, 34, 0), u), fov=44 - 4 * u,
         shadowC=(0, 15, -10), shadowR=95, fog=dict(mist=0.007), motes=0.6)
-def S_rise(u):               # up past the rim, the light fall beside us, to the gate across the island
-    w = ramp(u, 0.45)
-    p = spline([(-70, -75, -150), (-46, -32, -132), (-24, 8, -112), (-14, 24, -100)], w)
-    l = spline([(-50, -10, -40), (-28, 8, -22), (-5, 28, -5), (0, 33, 0)], w)
-    return dict(pos=p, look=l, fov=64 - 14 * w, roll=-10 * (1 - w), shadowC=(10, 10, -20), shadowR=100)
+# -- bar 1: the Rift Gate
+def S_rise(u):               # up over the rim: the gate across the island
+    return mv((-40, -4, -118), (-30, 17, -104), (-8, 22, 0), (0, 31, 0), u, 0.5, (60, 52), (-9, 0), shadowC=(0, 12, -30), shadowR=100)
 def S_dash(u):               # low and fast down the causeway between the lamps
-    p = lerp((2.0, 6.2, -78), (-0.8, 7.8, -30), u ** 0.9)
-    return dict(pos=p, look=lerp((0, 15, 0), (0, 24, 0), u), fov=68, roll=-5 + 8 * u, shadowC=(0, 5, -45), shadowR=50, motes=1.4)
+    return mv((2.0, 6.4, -72), (-0.6, 7.6, -50), (0, 15, 0), (0, 21, 0), u, 0.45, (68, 66), (-5, 2), shadowC=(0, 5, -45), shadowR=50, motes=1.4)
 def S_orbit_cry(u):          # round a crystal as it fires into the gate
-    c = CRY[5]; a = 200 + 95 * ramp(u, 0.4); p = orbit(c, 8.5, a, c[1] - 2 + 4 * u)
+    c = CRY[5]; w = ramp(u, 0.45); p = orbit(c, 8.5, 205 + 45 * w, c[1] - 2 + 3 * w)
     return dict(pos=p, look=c + [0, 0.5, 0], fov=52, shadowC=c - [0, 10, 0], shadowR=40, dof=0.010, focus=8.5)
-def S_city(u):               # up the great tower, the skyline and the hole behind it
-    w = ramp(u, 0.4)
-    p = spline([(-158, 6, -10), (-154, 40, -16), (-149, 78, -22), (-144, 106, -26)], w)
-    l = spline([(-175, 22, 30), (-175, 50, 30), (-175, 82, 30), (-176, 96, 36)], w)
-    return dict(pos=p, look=l, fov=56 - 4 * w, roll=4 * (1 - w), shadowC=(-175, 50, 30), shadowR=80)
-def S_city_orbit(u):         # sweep round the city at the height of its bridges
-    a = -128 + 62 * ramp(u, 0.45); p = orbit(SC['city']['c'], 66, a, 62)
-    return dict(pos=p, look=(-176, 56, 30), fov=50, roll=-3, shadowC=(-175, 45, 30), shadowR=80)
+def S_gate_low(u):           # under the ring, looking up through it at the hole
+    return mv((9, 8.5, -34), (5, 9.0, -27), (0, 58, 10), (0, 62, 12), u, 0.45, (74, 70), (8, 2), shadowC=(0, 20, -10), shadowR=60)
+# -- bar 2: the End City
+def S_city(u):               # up the great tower
+    return mv((-157, 22, -12), (-152, 52, -18), (-175, 36, 30), (-175, 66, 30), u, 0.45, (56, 54), (5, 2), shadowC=(-175, 50, 30), shadowR=80)
+def S_city_orbit(u):         # round the city at the height of its bridges
+    w = ramp(u, 0.45); p = orbit(SC['city']['c'], 66, -122 + 26 * w, 60)
+    return dict(pos=p, look=(-176, 54, 30), fov=50, roll=-3, shadowC=(-175, 45, 30), shadowR=80)
+def S_city_street(u):        # from the island's edge, up the great tower between the others
+    return mv((-128, 21, 30), (-134, 22.5, 31), (-175, 84, 30), (-175, 93, 30), u, 0.45, (64, 62), (9, 4), shadowC=(-165, 40, 30), shadowR=70)
+def S_city_top(u):           # past the crown of the great tower, the hole behind it
+    return mv((-166, 96, -14), (-170, 99, -6), (-175, 104, 40), (-176, 107, 50), u, 0.45, (58, 56), (-6, -2), shadowC=(-175, 80, 30), shadowR=60)
+# -- bar 3: the crystal spires
 def S_spires_skim(u):        # low between the crystals, toward the great one
-    w = ramp(u, 0.45)
-    p = spline([(128, 20, -20), (142, 23, -6), (154, 28, 8)], w)
-    return dict(pos=p, look=lerp((176, 44, 40), (177, 56, 40), w), fov=60, roll=6 - 10 * w, shadowC=(160, 25, 20), shadowR=60, motes=1.2)
-def S_spires_orbit(u):       # round and up the great crystal, the shards hanging, the hole behind
-    w = ramp(u, 0.4); a = -150 + 85 * w; p = orbit((175, 0, 40), 58 - 10 * w, a, 32 + 38 * w)
-    return dict(pos=p, look=lerp((176, 52, 40), (178, 74, 40), w), fov=54, shadowC=(175, 40, 40), shadowR=80)
+    return mv((128, 20, -20), (140, 23, -8), (176, 44, 40), (177, 50, 40), u, 0.45, (60, 60), (6, -2), shadowC=(160, 25, 20), shadowR=60, motes=1.2)
+def S_spires_orbit(u):       # round the great crystal
+    w = ramp(u, 0.45); p = orbit((175, 0, 40), 57 - 3 * w, -150 + 28 * w, 34 + 12 * w)
+    return dict(pos=p, look=lerp((176, 52, 40), (177, 60, 40), w), fov=54, shadowC=(175, 40, 40), shadowR=80)
+def S_spire_up(u):           # from its foot, up the great crystal to the hole
+    return mv((177, 21, -12), (178.5, 22.5, -6), (181, 66, 36), (181, 74, 36), u, 0.45, (70, 66), (-8, -3), shadowC=(178, 40, 30), shadowR=70)
+def S_shard_pass(u):         # over the great crystal's tip, down onto the spires
+    return mv((198, 106, 12), (193, 101, 19), (177, 32, 44), (176, 27, 44), u, 0.45, (62, 60), (6, 2), shadowC=(175, 30, 40), shadowR=70)
+# -- bar 4: the elder grove
 def S_grove(u):              # under the elder tree, the vines, the canopy alight
-    w = ramp(u, 0.4); p = lerp((40, -20, -215), (39, -16.5, -203), w)
-    return dict(pos=p, look=lerp((29, 0, -172), (30, 5, -172), w), fov=58, roll=-5 + 5 * w, shadowC=(34, -10, -180), shadowR=60, dof=0.004, focus=35,
-                fog=dict(mist=0.012, mistY=-30))
-def S_fall(u):               # face to face with the light fall, then down with it into the void
-    w = ramp(u, 0.35); f = SC['lightfalls'][-1]; lip = np.array(f[:3]); o = np.array([f[3], 0, f[4]])
-    p = lip + o * lerp(30, 36, w) + [0, lerp(4, -16, ein(w, 1.2)), 0]
-    l = lip + o * lerp(0, 3, w) + [0, lerp(-8, -42, w), 0]
-    return dict(pos=p, look=l, fov=58, roll=-4 + 8 * w, shadowC=lip, shadowR=50, fog=dict(mist=0.010))
-def S_wide(u):               # everything: the archipelago, the far End, the hole
-    w = ease(u) * 0.7 + 0.3 * u
-    p = spline([(-60, 40, -120), (-95, 62, -185), (-130, 85, -250)], w)
-    return dict(pos=p, look=lerp((0, 45, 30), (20, 70, 90), w), fov=56 + 6 * w, shadowC=(0, 10, 0), shadowR=130, motes=0.0, fog=dict(mist=0.008))
+    return mv((40, -20, -214), (39.4, -18, -207), (29, 0, -172), (30, 4, -172), u, 0.45, (58, 58), (-5, 0), shadowC=(34, -10, -180), shadowR=60,
+              dof=0.004, focus=35, fog=dict(mist=0.012, mistY=-30))
+def S_fall(u):               # face to face with the light fall, then down with it
+    w = ramp(u, 0.4); f = SC['lightfalls'][-1]; lip = np.array(f[:3]); o = np.array([f[3], 0, f[4]])
+    p = lip + o * lerp(30, 34, w) + [0, lerp(2, -10, w), 0]; l = lip + o * lerp(0, 2, w) + [0, lerp(-10, -30, w), 0]
+    return dict(pos=p, look=l, fov=58, roll=float(-4 + 6 * w), shadowC=lip, shadowR=50, fog=dict(mist=0.010))
+def S_pool(u):               # low over the pool, to the tree
+    return mv((-3, -25.6, -192), (1.5, -25.2, -188), (34, 0, -172), (34, 5, -172), u, 0.45, (68, 66), (6, 1), shadowC=(20, -20, -178), shadowR=50,
+              fog=dict(mist=0.012, mistY=-30))
+def S_canopy(u):             # the grove from off its edge: the tree, the light fall
+    return mv((-30, 0, -235), (-22, 3, -228), (32, -8, -175), (32, -4, -175), u, 0.45, (54, 52), (-6, -2), shadowC=(20, -10, -180), shadowR=70,
+              fog=dict(mist=0.010, mistY=-30))
+# -- bar 5: everything
+def S_wide(u):               # the archipelago, the far End, the hole
+    return mv((-60, 40, -120), (-76, 50, -150), (0, 45, 30), (7, 51, 48), u, 0.5, (56, 58), (0, 0), shadowC=(0, 10, 0), shadowR=130, motes=0.0,
+              fog=dict(mist=0.008))
+def S_tele(u):               # the gate, small, against the hole (long lens)
+    return mv((12, 22, -232), (8, 23, -226), (0, 50, 0), (0, 52, 0), u, 0.4, (31, 29), (0, 0), shadowC=(0, 15, -20), shadowR=110, fog=dict(mist=0.006))
+def S_gate_side(u):          # round the gate, the crystals on their pillars
+    w = ramp(u, 0.45); p = orbit(GC, 92, -38 + 12 * w, 58 + 2 * w)
+    return dict(pos=p, look=GC + [0, -2, 0], fov=54, roll=float(-4 + 3 * w), shadowC=(0, 20, 0), shadowR=100)
+def S_under(u):              # under the island, looking up the light fall
+    f = SC['lightfalls'][0]; lip = np.array(f[:3]); o = np.array([f[3], 0, f[4]])
+    return mv(lip + o * 26 + [0, -58, 0], lip + o * 24 + [0, -49, 0], lip + o * 3 + [0, -6, 0], lip + o * 2 + [0, -2, 0], u, 0.45, (72, 70), (10, 4),
+              shadowC=lip + [0, -20, 0], shadowR=70, fog=dict(mist=0.008))
 def S_punch(u):              # the hit before the break: straight at the Rift
     p = lerp((0, 31, -110), (0, 31, -52), eout(u, 3)); return dict(pos=p, look=(0, 31, 0), fov=50, shadowC=(0, 15, -20), shadowR=80)
 def S_break(u):              # under water: the black hole, slow, soft
     p = lerp((132, 46, -52), (136, 49, -46), u)
     return dict(pos=p, look=p + BHC * 100 + np.array([22, -12, 0]), fov=50, shadowC=(175, 40, 40), shadowR=80, dof=0.012, focus=60, motes=1.5)
-def S_charge(u):             # the crystals charge the gate, from the foot of the stairs
-    w = ramp(u, 0.3); p = lerp((13, 6.5, -40), (9, 10, -33), w)
-    return dict(pos=p, look=lerp((0, 30, 0), (0, 36, 0), w), fov=58, roll=-4 * w, shadowC=(0, 15, -10), shadowR=60)
+# -- the charge: a crystal joins on every beat
+def S_charge(u):             # from the foot of the stairs
+    w = ramp(u, 0.3); p = lerp((13, 6.5, -40), (10, 9, -35), w)
+    return dict(pos=p, look=lerp((0, 30, 0), (0, 35, 0), w), fov=58, roll=-4 * w, shadowC=(0, 15, -10), shadowR=60)
+def S_charge_c3(u):          # round the crystal that joins now
+    c = CRY[3]; w = ramp(u, 0.45); p = orbit(c, 9.0, 115 + 40 * w, c[1] - 1.5 + 3 * w)
+    return dict(pos=p, look=c + [0, 0.5, 0], fov=52, shadowC=c - [0, 10, 0], shadowR=40, dof=0.010, focus=9.0)
+def S_charge_c5(u):          # the next pair joins: across the pillars to the ring
+    return mv((24, 22, -78), (22, 25, -70), (19, 35, -4), (17, 36, -4), u, 0.45, (64, 62), (4, 0), shadowC=(15, 25, -20), shadowR=60)
+def S_charge_wide(u):        # all of them into the ring, from above
+    return mv((-20, 70, -90), (-16, 72, -82), GC + [0, -1, 0], GC + [0, 1, 0], u, 0.45, (56, 54), (-5, -2), shadowC=(0, 20, -10), shadowR=90)
 def S_approach(u):           # rising to the gate's eye, faster and faster
-    w = ein(u, 1.7); p = spline([(-20, 12, -120), (-8, 22, -80), (0, 30, -44)], w)
+    w = ein(u, 1.5); p = spline([(-12, 18, -100), (-5, 25, -72), (0, 30, -44)], w)
     return dict(pos=p, look=lerp((0, 30, 0), (0, 31, 0), w), fov=56 - 4 * w, roll=-6 + 6 * w, shadowC=(0, 15, -30), shadowR=90)
 def S_dive(u):               # in
     k = ein(u, 1.6); p = lerp((0, 31, -44), (0, 31, 8), k); return dict(pos=p, look=(0, 31, 40), fov=56 + 18 * k, roll=25 * k * k, shadowC=(0, 15, -10), shadowR=60)
 
 
-SHOTS = [(T_OPEN, T_SIL, 'intro', S_intro),
-         (kb(0), kb(4), 'rise', S_rise), (kb(4), kb(6), 'dash', S_dash), (kb(6), kb(8), 'cry', S_orbit_cry),
-         (kb(8), kb(12), 'city', S_city), (kb(12), kb(14), 'cityorbit', S_city_orbit),
-         (kb(14), kb(16), 'skim', S_spires_skim), (kb(16), kb(20), 'spires', S_spires_orbit),
-         (kb(20), kb(22), 'grove', S_grove), (kb(22), kb(24), 'fall', S_fall), (kb(24), kb(28), 'wide', S_wide),
-         (kb(28), T_BREAK, 'punch', S_punch), (T_BREAK, T_GIRL, 'break', S_break),
-         (T_GIRL, BEATS[np.searchsorted(BEATS, T_GIRL) + 2], 'charge', S_charge), (BEATS[np.searchsorted(BEATS, T_GIRL) + 2], T_START, 'approach', S_approach),
-         (T_START, T_CUT, 'dive', S_dive)]
-# whip pans across these cuts (direction +1 / -1)
-WHIPS = {kb(8): 1, kb(14): -1, kb(20): 1, kb(24): -1, kb(12): 1}
+DROP_SHOTS = [('rise', S_rise), ('dash', S_dash), ('cry', S_orbit_cry), ('gatelow', S_gate_low),
+              ('city', S_city), ('cityorbit', S_city_orbit), ('citystreet', S_city_street), ('citytop', S_city_top),
+              ('skim', S_spires_skim), ('spires', S_spires_orbit), ('spireup', S_spire_up), ('shards', S_shard_pass),
+              ('grove', S_grove), ('fall', S_fall), ('pool', S_pool), ('grovewide', S_canopy),
+              ('wide', S_wide), ('tele', S_tele), ('gateside', S_gate_side), ('under', S_under)]
+_lb = [t for t in BEATS if T_GIRL < t < T_START]          # the charge's beats: the kick comes back on the 2nd
+CB = _lb[1:5]
+SHOTS = [(T_OPEN, T_SIL, 'intro', S_intro)]
+SHOTS += [(kb(i), kb(i + 1), n, f) for i, (n, f) in enumerate(DROP_SHOTS)]
+SHOTS += [(kb(len(DROP_SHOTS)), T_BREAK, 'punch', S_punch), (T_BREAK, T_GIRL, 'break', S_break),
+          (T_GIRL, CB[0], 'charge', S_charge), (CB[0], CB[1], 'charge3', S_charge_c3), (CB[1], CB[2], 'charge5', S_charge_c5),
+          (CB[2], CB[3], 'chargewide', S_charge_wide), (CB[3], T_START, 'approach', S_approach), (T_START, T_CUT, 'dive', S_dive)]
+GATE_DROP = ('rise', 'dash', 'gatelow', 'gateside', 'punch')
+CHARGE = ('charge', 'charge3', 'charge5', 'chargewide', 'approach', 'dive')
+# whip pans into each new place (direction +1 / -1)
+WHIPS = {kb(4): 1, kb(8): -1, kb(12): 1, kb(16): -1}
 WHIP_PRE, WHIP_POST, WHIP_DEG = 0.13, 0.17, 60.0
 
 
@@ -186,16 +228,16 @@ def lights_for(c, v, gate):
 
 def beams_for(v, name):
     out = []
-    if name == 'cry':                                         # the orbit crystal fires on the next beat
-        t = kb(7); k = ease((v - t) / 0.08)
+    si = shot_index(v); t0 = SHOTS[si][0] if si is not None else v
+    if name == 'cry':                                         # the crystal fires just after the cut
+        k = ease((v - t0 - 0.05) / 0.08)
         if k > 0: out.append([*CRY[5], *CHEV[5], 0.30, k * (1.4 + 0.4 * np.sin(v * 40))])
-    if name in ('rise', 'dash'):                              # on the bar, every crystal fires into the gate
-        for t in (kb(0), kb(4)):
-            d = v - t
-            if 0 <= d < 1.2:
-                k = ease(d / 0.06) * (1 - ease((d - 0.6) / 0.6))
-                for i, c in enumerate(CRY[2:]): out.append([*c, *CHEV[i % len(CHEV)], 0.32, k * (1.2 + 0.3 * np.sin(v * 33 + i))])
-    if name in ('charge', 'approach', 'dive'):                # the charge: crystals join in, beat by beat
+    if name in GATE_DROP:                                     # on the gate's beats every crystal fires into it
+        d = v - t0
+        if 0 <= d < 0.65:
+            k = ease(d / 0.06) * (1 - ease((d - 0.35) / 0.3))
+            for i, c in enumerate(CRY[2:]): out.append([*c, *CHEV[i % len(CHEV)], 0.32, k * (1.2 + 0.3 * np.sin(v * 33 + i))])
+    if name in CHARGE:                                        # the charge: crystals join in, beat by beat
         n = sum(1 for t in LATE_BEATS if t <= v) * 2
         for i, c in enumerate(CRY[:min(n, len(CRY))]):
             tgt = CHEV[i % len(CHEV)] if i >= 2 else GC + [(-1) ** i * 6, -12, -3]
@@ -224,7 +266,9 @@ def post_at(v, c):
         p, down = pulse(v, LATE_BEATS, 0.09); e['zoom'] += 0.03 * p; e['zblur'] = 0.12 * p ** 1.5; e['exposure'] += 0.12 * p; e['ca'] += 0.004 * p
     for a, b, nm, _ in SHOTS[1:]:                            # a hard cut gets a white pop
         d = v - a
-        if 0 <= d < 0.16 and nm not in ('break',): e['flash'] = max(e['flash'], (0.5 if a == T_DROP else 0.18) * (1 - d / 0.16))
+        if 0 <= d < 0.16 and nm not in ('break',):
+            f0 = 0.5 if a == T_DROP else (0.2 if any(abs(a - tc) < 1e-6 for tc in WHIPS) else 0.1)
+            e['flash'] = max(e['flash'], f0 * (1 - d / 0.16))
     if T_BREAK <= v < T_GIRL:
         d = v - T_BREAK; e.update(bloom=0.13, sat=0.8, vig=0.6, exposure=0.85, tint=[0.85, 0.92, 1.18], contrast=0.9)
         if d < 0.25: e['flash'] = 0.45 * (1 - d / 0.25)
@@ -243,7 +287,7 @@ def params_at(v, c):
     gate = 0.85; spin = 1.0
     if T_DROP <= v < T_BREAK: p, down = pulse(v, DROP_BEATS, 0.12); gate += 0.45 * p
     if name == 'intro': p, _ = pulse(v, INTRO_BEATS, 0.12); gate += 0.3 * p
-    if name in ('charge', 'approach', 'dive'):
+    if name in CHARGE:
         k = (v - T_GIRL) / (T_CUT - T_GIRL); p, _ = pulse(v, LATE_BEATS, 0.12); gate = 0.9 + 1.0 * k + 0.4 * p; spin = 1 + 3.5 * ein(k, 2)
     r['gate'] = float(gate); r['spin'] = float(spin)
     emk = 1.0
@@ -268,7 +312,7 @@ def frame(k):
         if v >= T_TAP - 0.02: out['caption'] = dict(v=v, t0=T_TAP, t1=T_OPEN)
         return out
     if v >= T_CUT:
-        out['notif'] = dict(v=v, t0=T_CUT + 0.55, t1=T_END - 0.75); return out
+        out['notif'] = dict(v=v, t0=T_CUT + 0.45, t1=T_END - 0.55); return out
     c = cam(v)
     if c is None:                                            # silence before the drop
         out['render'] = None; out['black'] = True; return out
