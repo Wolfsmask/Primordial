@@ -13,14 +13,17 @@ in headless Chromium; the phone, the caption, the title and the last notificatio
 4. `web/end2.html` is the renderer. Put three.js in `web/node_modules/three` (`npm i three@0.160.0` inside `web/`). It
    exposes `renderView(params)`, which returns one finished frame.
 5. `python3 end_audio.py` cuts the song (not included: put it next to the scripts as `song.wav`) into `audio_edit.wav`:
-   it starts at "It's your undress rehearsal", tape-stops before the drop, splices two bars out of the drop (on the beat,
-   where the two bars match), pulls the break under water and echoes out on "start". `beats.npy` holds the song's beat times.
+   it starts at "It's your undress rehearsal", tape-stops after "Lights, camera, action", splices three bars out of the
+   drop (on the beat: two where the bars match, one where the vocal rests between two "Ooh la la la la" lines), pulls the
+   break under water and echoes out on "start". `beats.npy` holds the song's beat times.
 6. `end2_anim.py` is the edit on that cut: a new shot on every beat of the drop (a place per bar: the Rift Gate, the
-   End City, the crystal spires, the grove, everything, with a whip pan into each), a crystal joining the charge on every
-   beat after the break, the punch-ins, the title and caption timing, the lights and the grade per frame. The other beat
-   cuts are zoom-twists: the shot zooms in and rolls into the cut, the next one starts zoomed in and rolled further round
-   and unwinds (camera roll and field of view, so the renderer's motion blur smears them).
-7. `python3 end2_film.py test 10,20,30` renders a contact sheet; `python3 end2_film.py render 0:1855 1080x1920` renders
-   the 30.9 s at 60 fps into `frames/` (split it across processes, e.g. `0:700`, `700:1300`, `1300:1855`, or give it a
+   End City, the crystal spires, the grove, with a whip pan into each), a crystal joining the charge on every beat after
+   the break, the title on "Lights, camera, action" (a step bigger on each word), the lights and the grade per frame.
+   The camera works like a velocity edit: along each run of beat shots it never settles. Each shot comes in fast and
+   rolling, zoomed in, slows a little as it swings over, then twists back the other way and speeds up into the next cut;
+   the move along its own path is speed-ramped the same way (camera roll and field of view, so the renderer's motion
+   blur smears the fast parts).
+7. `python3 end2_film.py test 10,20,30` renders a contact sheet; `python3 end2_film.py render 0:1701 1080x1920` renders
+   the 28.35 s at 60 fps into `frames/` (split it across processes, e.g. `0:600`, `600:1150`, `1150:1701`, or give it a
    file of frame numbers: `render @list.txt 1080x1920`).
 8. `bash encode2.sh` encodes the frames with the edited music.

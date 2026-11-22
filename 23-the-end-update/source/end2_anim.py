@@ -1,13 +1,14 @@
 """The End Update v2: the timeline.  video time v -> renderView params + 2D overlay state.  Cut to the beat:
   0      - 4.904   the phone: GTA VI at midnight, then the End Update lands; tap -> caption "The End Update"
-  4.904  - 9.30    THE END UPDATE in the middle (pulsing on the beat) while the camera slowly pushes in on the Rift Gate;
-                   the tape stop freezes it, black
-  9.605  - 23.23   the drop (two bars shorter than the song's): a new shot on every kick; a place per bar (the Rift Gate,
-                   the End City, the crystal spires, the grove, everything) with a whip pan into each, a punch-in on every beat
-  23.23  - 24.34   the break, under water: slow motion, the black hole
-  24.34  - 28.92   "Girl, tell me now ... it's about to start": a crystal joins the charge on every beat, a new angle on each;
+  4.904  - 9.30    the camera slowly pushes in on the Rift Gate; on "Lights, camera, action" THE END UPDATE lands in the
+                   middle, a step bigger on each word; the tape stop freezes it, black
+  9.605  - 20.65   the drop (three bars shorter than the song's): a new shot on every kick; a place per bar (the Rift Gate,
+                   the End City, the crystal spires, the grove) with a whip pan into each. The velocity edit: every shot
+                   comes in fast and spinning, slows a little, then twists the other way and speeds up into the next cut
+  20.65  - 21.76   the break, under water: slow motion, the black hole
+  21.76  - 26.34   "Girl, tell me now ... it's about to start": a crystal joins the charge on every beat, a new angle on each;
                    on "start" into the Rift
-  28.92  - 30.92   black; GTA VI: "your game is ready to play"
+  26.34  - 28.34   black; GTA VI: "your game is ready to play"
 frame(k) -> dict"""
 import json, os
 import numpy as np
@@ -15,21 +16,22 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 FPS = 60
 SC = json.load(open(os.path.join(HERE, 'web', 'scene.json')))
-CUT_A, CUT_B = 24.055873015873015, 29.23392290249433      # song [CUT_A, CUT_B) is spliced out of the drop (end_audio.py)
+_b = np.load(os.path.join(HERE, 'beats.npy'))
+CUTS = [(float(_b[33]), float(_b[41])), (float(_b[49]), float(_b[53]))]   # song [a, b) spliced out of the drop (end_audio.py)
 DEG = np.pi / 180
 UP = np.array([0, 1.0, 0])
 BHC = np.array([0, np.sin(19 * DEG), np.cos(19 * DEG)])
 
 
 def song_to_v(t):
-    if t >= CUT_B: return t - (CUT_B - CUT_A) - 21.40 + 9.55
-    return t - 21.40 + 9.55 if t >= 21.40 else t - 12.0
-_b = np.load(os.path.join(HERE, 'beats.npy'))
-BEATS = np.array([song_to_v(t) for t in _b if 12.0 < t < 46.2 and not (20.9 < t < 21.40) and not (CUT_A - 0.01 < t < CUT_B - 0.01)])
+    if t < 21.40: return t - 12.0
+    return t - sum(b - a for a, b in CUTS if t >= b) - 21.40 + 9.55
+BEATS = np.array([song_to_v(t) for t in _b if 12.0 < t < 46.2 and not (20.9 < t < 21.40) and not any(a - 0.01 < t < b - 0.01 for a, b in CUTS)])
 DB = BEATS[BEATS >= 9.6]                     # the drop's beats: DB[0] = 9.605
 def kb(k): return float(DB[k])
 T_TAP = song_to_v(16.254); T_OPEN = song_to_v(16.904); T_N2 = song_to_v(14.977)
 T_TAPE = 8.90; T_SIL = 9.30; T_DROP = kb(0)
+T_WORDS = [song_to_v(18.90), song_to_v(19.58), song_to_v(20.37)]   # "Lights, camera, action"
 T_BREAK = song_to_v(40.26); T_GIRL = song_to_v(41.37); T_START = song_to_v(45.04); T_CUT = song_to_v(45.95)
 T_END = T_CUT + 2.0
 NFRAMES = int(round(T_END * FPS))
@@ -66,7 +68,7 @@ def S_intro(u):              # the slow push in on the Rift, under the title
         shadowC=(0, 15, -10), shadowR=95, fog=dict(mist=0.007), motes=0.6)
 # -- bar 1: the Rift Gate
 def S_rise(u):               # up over the rim: the gate across the island
-    return mv((-40, -4, -118), (-30, 17, -104), (-8, 22, 0), (0, 31, 0), u, 0.5, (60, 52), (-9, 0), shadowC=(0, 12, -30), shadowR=100)
+    return mv((-40, -4, -118), (-30, 17, -104), (-8, 22, 0), (0, 31, 0), u, 0.5, (60, 52), (0, 0), shadowC=(0, 12, -30), shadowR=100)
 def S_dash(u):               # low and fast down the causeway between the lamps
     return mv((2.0, 6.4, -72), (-0.6, 7.6, -50), (0, 15, 0), (0, 21, 0), u, 0.45, (68, 66), (-5, 2), shadowC=(0, 5, -45), shadowR=50, motes=1.4)
 def S_orbit_cry(u):          # round a crystal as it fires into the gate
@@ -147,8 +149,7 @@ def S_dive(u):               # in
 DROP_SHOTS = [('rise', S_rise), ('dash', S_dash), ('cry', S_orbit_cry), ('gatelow', S_gate_low),
               ('city', S_city), ('cityorbit', S_city_orbit), ('citystreet', S_city_street), ('citytop', S_city_top),
               ('skim', S_spires_skim), ('spires', S_spires_orbit), ('spireup', S_spire_up), ('shards', S_shard_pass),
-              ('grove', S_grove), ('fall', S_fall), ('pool', S_pool), ('grovewide', S_canopy),
-              ('wide', S_wide), ('tele', S_tele), ('gateside', S_gate_side), ('under', S_under)]
+              ('grove', S_grove), ('fall', S_fall), ('pool', S_pool), ('grovewide', S_canopy)]
 _lb = [t for t in BEATS if T_GIRL < t < T_START]          # the charge's beats: the kick comes back on the 2nd
 CB = _lb[1:5]
 SHOTS = [(T_OPEN, T_SIL, 'intro', S_intro)]
@@ -156,23 +157,34 @@ SHOTS += [(kb(i), kb(i + 1), n, f) for i, (n, f) in enumerate(DROP_SHOTS)]
 SHOTS += [(kb(len(DROP_SHOTS)), T_BREAK, 'punch', S_punch), (T_BREAK, T_GIRL, 'break', S_break),
           (T_GIRL, CB[0], 'charge', S_charge), (CB[0], CB[1], 'charge3', S_charge_c3), (CB[1], CB[2], 'charge5', S_charge_c5),
           (CB[2], CB[3], 'chargewide', S_charge_wide), (CB[3], T_START, 'approach', S_approach), (T_START, T_CUT, 'dive', S_dive)]
-GATE_DROP = ('rise', 'dash', 'gatelow', 'gateside', 'punch')
+GATE_DROP = ('rise', 'dash', 'gatelow', 'punch')
 CHARGE = ('charge', 'charge3', 'charge5', 'chargewide', 'approach', 'dive')
 # whip pans into each new place (direction +1 / -1)
-WHIPS = {kb(4): 1, kb(8): -1, kb(12): 1, kb(16): -1}
+WHIPS = {kb(4): 1, kb(8): -1, kb(12): 1}
 WHIP_PRE, WHIP_POST, WHIP_DEG = 0.13, 0.17, 60.0
-# zoom-twist cuts (the edit transition): the shot zooms in and rolls one way into the cut, the next one starts
-# zoomed in and rolled further round, then unwinds and zooms back out. Every beat cut that is not a whip pan.
-_tw = [T_DROP] + [kb(i) for i in range(1, len(DROP_SHOTS) + 1) if kb(i) not in WHIPS] + [float(t) for t in CB]
-TWISTS = {tc: (1 if i % 2 == 0 else -1) for i, tc in enumerate(_tw)}
-TW_PRE, TW_POST, TW_DEG, TW_ZOOM = 0.16, 0.20, 35.0, 0.75
+# the velocity edit: along each chain of beat shots the camera never settles. Each shot comes in fast and rolling
+# (carrying the last one's spin through the cut, zoomed in), slows a little as it swings over, then twists back the
+# other way and speeds up into the next cut, zooming in again. The move along the shot's own path is speed-ramped the
+# same way: fast at both cuts, slower through the middle.
+VEL_A, VEL_B, VEL_P, VEL_Z, VEL_M = 24.0, 16.0, 1.7, 0.45, 0.35
+CHAINS = [[n for n, _ in DROP_SHOTS] + ['punch'], ['charge', 'charge3', 'charge5', 'chargewide', 'approach']]
+NO_RAMP = ('punch', 'approach')                         # these keep their own push
+VEL = {}                                                # shot name -> (spin in, spin out, ramp the path)
+for ch in CHAINS:
+    s_prev = 0
+    for i, n in enumerate(ch):
+        s_in = s_prev; s_out = 0 if i == len(ch) - 1 else (-s_in if s_in else 1)
+        VEL[n] = (s_in, s_out, n not in NO_RAMP); s_prev = s_out
 
 
-def twist(v, a, b):
-    """(roll, zoom-1, k) from the zoom-twist cuts for a time v inside the shot [a, b)"""
-    for tc, dr in TWISTS.items():
-        if abs(b - tc) < 1e-6 and v >= tc - TW_PRE: k = ein((v - (tc - TW_PRE)) / TW_PRE, 2.6); return dr * TW_DEG * k, TW_ZOOM * k, k
-        if abs(a - tc) < 1e-6 and v < tc + TW_POST: k = 1 - eout((v - tc) / TW_POST, 2.6); return -dr * TW_DEG * k, TW_ZOOM * k, k
+def vel(v, si):
+    """(roll, zoom - 1, k) for shot si at time v; k: 0 mid-shot .. 1 at a cut"""
+    a, b, n, _ = SHOTS[si]
+    if n not in VEL: return 0.0, 0.0, 0.0
+    si_, so, _ = VEL[n]; u = (v - a) / (b - a); P = VEL_P
+    if si_ and so: x = abs(2 * u - 1); return si_ * (-VEL_A + (VEL_A + VEL_B) * (1 - x ** P)), VEL_Z * x ** P, min(x ** P, 1.0)
+    if si_: x = 1 - u; return -si_ * VEL_A * x ** P, VEL_Z * x ** P, min(x ** P, 1.0)
+    if so: x = max(u, 0.0); return so * VEL_A * x ** P, VEL_Z * x ** P, min(x ** P, 1.0)
     return 0.0, 0.0, 0.0
 
 
@@ -197,13 +209,15 @@ def cam(v, si=None):
     tv = v
     if name == 'intro' and v > T_TAPE:                       # the tape stop: everything slows to a halt
         x = min(v - T_TAPE, 0.4); tv = T_TAPE + x - x * x / 0.8
-    c = fn((tv - a) / (b - a)); c = dict(c)
+    u = (tv - a) / (b - a)
+    if VEL.get(name, (0, 0, False))[2]: x = 2 * u - 1; u = 0.5 + 0.5 * ((1 - VEL_M) * x + VEL_M * x ** 3)
+    c = fn(u); c = dict(c)
     pos = np.array(c['pos'], float); look = np.array(c['look'], float); d = look - pos
     yaw = 0.0; roll = c.get('roll', 0.0)
     for tc, dr in WHIPS.items():
-        if tc - WHIP_PRE <= v < tc and abs(b - tc) < 1e-6: x = (v - (tc - WHIP_PRE)) / WHIP_PRE; yaw += dr * WHIP_DEG * ein(x, 2.4); roll += dr * 10 * ein(x, 2)
-        if tc <= v < tc + WHIP_POST and abs(a - tc) < 1e-6: x = (v - tc) / WHIP_POST; yaw -= dr * WHIP_DEG * (1 - eout(x, 2.4)); roll -= dr * 10 * (1 - eout(x, 2))
-    tr, tz, _ = twist(v, a, b); roll += tr
+        if tc - WHIP_PRE <= v < tc and abs(b - tc) < 1e-6: x = (v - (tc - WHIP_PRE)) / WHIP_PRE; yaw += dr * WHIP_DEG * ein(x, 2.4)
+        if v < tc + WHIP_POST and abs(a - tc) < 1e-6: x = (v - tc) / WHIP_POST; yaw -= dr * WHIP_DEG * (1 - eout(x, 2.4))
+    tr, tz, _ = vel(v, si); roll += tr
     if tz: c['fov'] = float(2 * np.degrees(np.arctan(np.tan(np.radians(c['fov']) / 2) / (1 + tz))))
     d = rot_y(d, yaw)
     hh = handheld(v, 0.0025 * np.linalg.norm(d)) if name not in ('intro',) else handheld(v * 0.5, 0.0012 * np.linalg.norm(d))
@@ -284,9 +298,9 @@ def post_at(v, c):
         if 0 <= d < 0.16 and nm not in ('break',):
             f0 = 0.5 if a == T_DROP else (0.2 if any(abs(a - tc) < 1e-6 for tc in WHIPS) else 0.1)
             e['flash'] = max(e['flash'], f0 * (1 - d / 0.16))
-    if c and c.get('si') is not None:                       # the zoom-twist smears outward too
-        _, _, k = twist(v, SHOTS[c['si']][0], SHOTS[c['si']][1])
-        if k > 0: e['zblur'] = max(e['zblur'], 0.16 * k ** 1.3); e['ca'] += 0.008 * k
+    if c and c.get('si') is not None:                       # the velocity smears outward at the cuts
+        _, _, k = vel(v, c['si'])
+        if k > 0: e['zblur'] = max(e['zblur'], 0.14 * k ** 1.5); e['ca'] += 0.006 * k
     if T_BREAK <= v < T_GIRL:
         d = v - T_BREAK; e.update(bloom=0.13, sat=0.8, vig=0.6, exposure=0.85, tint=[0.85, 0.92, 1.18], contrast=0.9)
         if d < 0.25: e['flash'] = 0.45 * (1 - d / 0.25)
@@ -338,12 +352,11 @@ def frame(k):
     if c['name'] != 'intro' or v < T_TAPE:                   # camera motion blur (same shot, one frame back)
         pc = cam(v - 1.0 / FPS, c['si'])
         r['prev'] = dict(pos=[float(x) for x in pc['pos']], look=[float(x) for x in pc['look']], fov=float(pc['fov']), roll=float(pc.get('roll', 0.0)))
-        r['shutter'] = 0.5
+        r['shutter'] = 0.5 + 0.35 * vel(v, c['si'])[2]
         if any(tc - WHIP_PRE <= v < tc + WHIP_POST for tc in WHIPS): r['shutter'] = 0.9
-        if any(tc - TW_PRE <= v < tc + TW_POST for tc in TWISTS): r['shutter'] = 0.85
     out['render'] = r
-    if c['name'] == 'intro' and v < T_SIL:
-        out['title'] = dict(v=v, t0=T_OPEN, tape=T_TAPE, sil=T_SIL, beats=INTRO_BEATS)
+    if c['name'] == 'intro' and T_WORDS[0] <= v < T_SIL:
+        out['title'] = dict(v=v, words=T_WORDS, tape=T_TAPE, sil=T_SIL, beats=INTRO_BEATS)
     return out
 
 

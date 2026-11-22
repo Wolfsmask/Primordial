@@ -2,8 +2,9 @@
   [12.00, 20.90)  plays as is ("It's your undress rehearsal ... back seat")
   tape stop        20.90 -> 21.10 slows to a halt over 0.40 s
   silence          0.25 s
-  [21.40, 46.13)  plays from just before the drop, with two bars of the drop spliced out (song 24.056 -> 29.234, on
-                   the beat, where the two bars match); the break (39.6 - 41.4) is pulled under water (low-passed)
+  [21.40, 46.13)  plays from just before the drop, with three bars of the drop spliced out, on the beat: two bars at
+                   song 24.056 -> 29.234 (where they match) and one at 34.435 -> 37.013 (between two "Ooh la la la la"
+                   lines, where the vocal rests); the break (39.6 - 41.4) is pulled under water (low-passed)
   the last word    "start" is thrown into echoes that ring out into the dark (+ a low boom)
 python3 end_audio.py -> audio_edit.wav (48 kHz stereo) and prints the key times"""
 import numpy as np, librosa, soundfile as sf
@@ -12,11 +13,12 @@ from scipy.signal import butter, sosfilt
 SR = 48000
 T0 = 12.00
 A_END = 20.90; TS = 0.40; GAP = 0.25; B0 = 21.40; B_END = 46.13
-CUT_A, CUT_B = 24.055873015873015, 29.23392290249433    # beats 33 and 41: song [CUT_A, CUT_B) is left out
+_bt = np.load('beats.npy')
+CUTS = [(float(_bt[33]), float(_bt[41])), (float(_bt[49]), float(_bt[53]))]   # song [a, b) is left out (beats 33-41, 49-53)
 OUT_B0 = (A_END - T0) + TS + GAP                 # video time where song B0 lands
 def out_of(song_t):
-    if song_t >= CUT_B: return song_t - (CUT_B - CUT_A) - B0 + OUT_B0
-    return song_t - B0 + OUT_B0 if song_t >= B0 else song_t - T0
+    if song_t < B0: return song_t - T0
+    return song_t - sum(b - a for a, b in CUTS if song_t >= b) - B0 + OUT_B0
 
 
 def main():
@@ -36,9 +38,10 @@ def main():
     tb = B0 + np.arange(Bm.shape[1]) / SR
     w = np.clip((tb - 39.55) / 0.5, 0, 1) * np.clip((41.42 - tb) / 0.12, 0, 1)
     Bm = Bm * (1 - w) + wet * w
-    # the splice: 8 ms ahead of both beats so the kick lands whole, a 15 ms equal-power crossfade
-    ia = int((CUT_A - 0.008 - B0) * SR); ib = int((CUT_B - 0.008 - B0) * SR); x = int(0.015 * SR); q = np.linspace(0, 1, x) * np.pi / 2
-    Bm = np.concatenate([Bm[:, :ia - x], Bm[:, ia - x:ia] * np.cos(q) + Bm[:, ib - x:ib] * np.sin(q), Bm[:, ib:]], 1)
+    # the splices (the later one first): 8 ms ahead of both beats so the kick lands whole, a 15 ms equal-power crossfade
+    for ca, cb in sorted(CUTS, reverse=True):
+        ia = int((ca - 0.008 - B0) * SR); ib = int((cb - 0.008 - B0) * SR); x = int(0.015 * SR); q = np.linspace(0, 1, x) * np.pi / 2
+        Bm = np.concatenate([Bm[:, :ia - x], Bm[:, ia - x:ia] * np.cos(q) + Bm[:, ib - x:ib] * np.sin(q), Bm[:, ib:]], 1)
     # the end: "start" thrown into echoes
     tail_len = 2.4; out = np.concatenate([A, tape, gap, Bm], 1)
     word = S(45.30, 45.95); echo = np.zeros((2, int((0.65 + tail_len) * SR)))

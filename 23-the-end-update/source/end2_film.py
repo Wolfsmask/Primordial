@@ -209,12 +209,16 @@ def title_img(W):
 def title(img, P, W, H):
     if not P: return img
     v = P['v']; T, G = title_img(W)
-    age = v - P['t0']; sc = 1.0 + 0.16 * np.exp(-age / 0.10) + 0.035 * min(age / 4.0, 1.0)
-    gl = 0.55
+    ws = P['words']; age = v - ws[0]                     # "Lights, camera, action": in small, a step bigger on each word
+    if age < 0: return img
+    steps = (0.60, 0.79, 1.0); i = max(j for j, t in enumerate(ws) if v >= t); d = v - ws[i]
+    s0 = steps[i - 1] if i else 0.42
+    sc = s0 + (steps[i] - s0) * float(spring(d / 0.24)) + 0.012 * d
+    gl = 0.5 + 0.9 * np.exp(-d / 0.16)
     for t in P['beats']:
-        d = v - t
-        if 0 <= d < 0.6: sc += 0.06 * np.exp(-d / 0.11); gl += 0.6 * np.exp(-d / 0.15)
-    a = min(1.0, age / 0.06)
+        db = v - t
+        if 0 <= db < 0.6: gl += 0.3 * np.exp(-db / 0.15)
+    a = min(1.0, age / 0.05)
     jx = jy = 0
     if v >= P['tape']:
         k = (v - P['tape']) / (P['sil'] - P['tape']); a *= 1 - ease(k); sc *= 1 - 0.05 * k
