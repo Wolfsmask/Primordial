@@ -3,8 +3,8 @@
   tape stop        20.90 -> 21.10 slows to a halt over 0.40 s
   silence          0.25 s
   [21.40, 46.13)  plays from just before the drop, with three bars of the drop spliced out, on the beat: two bars at
-                   song 24.056 -> 29.234 (where they match) and one at 34.435 -> 37.013 (between two "Ooh la la la la"
-                   lines, where the vocal rests); the break (39.6 - 41.4) is pulled under water (low-passed)
+                   song 24.056 -> 29.234 (where they match) and the second "Ooh la la la la" line, 36.991 -> 39.569 (the
+                   vocal rests at both ends); the break (39.6 - 41.4) is pulled under water (low-passed)
   the last word    "start" is thrown into echoes that ring out into the dark (+ a low boom)
 python3 end_audio.py -> audio_edit.wav (48 kHz stereo) and prints the key times"""
 import numpy as np, librosa, soundfile as sf
@@ -14,7 +14,9 @@ SR = 48000
 T0 = 12.00
 A_END = 20.90; TS = 0.40; GAP = 0.25; B0 = 21.40; B_END = 46.13
 _bt = np.load('beats.npy')
-CUTS = [(float(_bt[33]), float(_bt[41])), (float(_bt[49]), float(_bt[53]))]   # song [a, b) is left out (beats 33-41, 49-53)
+# song [a, b) is left out: beats 33-41, and the second "Ooh la la la la" line (from just before the beat-53 kick to just
+# before the beat-57 kick's attack; the same length as beats 49-53, so everything after it keeps its place)
+CUTS = [(float(_bt[33]), float(_bt[41])), (float(_bt[53]) - 0.022, float(_bt[53]) - 0.022 + float(_bt[53] - _bt[49]))]
 OUT_B0 = (A_END - T0) + TS + GAP                 # video time where song B0 lands
 def out_of(song_t):
     if song_t < B0: return song_t - T0

@@ -14,8 +14,8 @@ in headless Chromium; the phone, the caption, the title and the last notificatio
    exposes `renderView(params)`, which returns one finished frame.
 5. `python3 end_audio.py` cuts the song (not included: put it next to the scripts as `song.wav`) into `audio_edit.wav`:
    it starts at "It's your undress rehearsal", tape-stops after "Lights, camera, action", splices three bars out of the
-   drop (on the beat: two where the bars match, one where the vocal rests between two "Ooh la la la la" lines), pulls the
-   break under water and echoes out on "start". `beats.npy` holds the song's beat times.
+   drop (on the beat: two where the bars match, and the second "Ooh la la la la" line so the phrase plays once), pulls
+   the break under water and echoes out on "start". `beats.npy` holds the song's beat times.
 6. `end2_anim.py` is the edit on that cut: a new shot on every beat of the drop (a place per bar: the Rift Gate, the
    End City, the crystal spires, the grove, with a whip pan into each), a crystal joining the charge on every beat after
    the break, the title on "Lights, camera, action" (a step bigger on each word), the lights and the grade per frame.
